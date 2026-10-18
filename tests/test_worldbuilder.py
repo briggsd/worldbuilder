@@ -134,6 +134,12 @@ class WorldbuilderTest(unittest.TestCase):
         r = self.check()
         self.assertTrue(any("frontmatter missing" in i for i in r["world"]["issues"]))
 
+    def test_map_name_colliding_with_project_link_is_an_issue(self):
+        self.add_world()
+        self.write("lonely/c.md", "# C\n\nSee [[notes]] for more.\n")
+        r = self.check()
+        self.assertTrue(any("name collision" in i for i in r["world"]["issues"]))
+
     def test_trailhead_block_puts_world_at_hop_one(self):
         self.add_world()
         self.write("CLAUDE.md", f"# P\n{wb.MARK_START}\nSee [[world/WORLD]].\n{wb.MARK_END}\n")

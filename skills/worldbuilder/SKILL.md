@@ -24,7 +24,7 @@ Find the project root (the user names it, or the current directory). If `world/W
 ## Step 1: Survey and agree on areas
 
 1. `worldbuilder survey`. It writes `world/.survey.json` and prints the proposed areas, link style, trailheads, and project skills.
-2. Turn the proposal into an area list. Merge areas under about 5 files into a neighbor. Put generated output, archives, imports, and eval workspaces under one "edges" area, or into `exclude` when they shouldn't be in the territory at all. Name each area the way the project's people would.
+2. Turn the proposal into an area list. Merge areas under about 5 files into a neighbor. Put generated output, archives, imports, and eval workspaces under one "edges" area, or into `exclude` when they shouldn't be in the territory at all. Name each area the way the project's people would. Pick ids that match no existing file or folder name, since a bare link like `[[Context]]` resolves to `world/context.md` in Obsidian (`worldbuilder check` reports this as a name collision).
 3. Show the user the list (id, name, covers, file count) in one table and ask for changes. Record the agreed list and any excludes in `world/config.json`. If you changed excludes, run `worldbuilder survey` again.
 
 Done when every file in the survey falls under some area's `covers` or under `exclude`, and the user has agreed to the list.

@@ -514,6 +514,11 @@ def check_world(root, files, parsed, edges, territory):
         maps.append({"map": m, "covers": covers, "built": fm.get("built"), "files": len(in_scope),
                      "changed_since_built": len(stale), "changed": stale[:20], "links": entries,
                      "lines": len(read_text(root, m).splitlines())})
+    for e in edges:
+        if (e["kind"] == "file" and under(e["target"], WORLD_DIR) and e["target"] != world_md
+                and not under(e["src"], WORLD_DIR) and not under(e["src"], ROUTER_DIR)):
+            issues.append(f"{e['target']}: captures a project link from {e['src']}:{e['line']} "
+                          f"(name collision, rename the map)")
     uncovered = sorted(set(territory) - set(covered_by_maps))
     world_dead = [{"src": e["src"], "line": e["line"], "target": e["target"], "anchor": e["anchor"]}
                   for e in edges if under(e["src"], WORLD_DIR) or under(e["src"], ROUTER_DIR)
