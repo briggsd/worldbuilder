@@ -195,6 +195,15 @@ class WorldbuilderTest(unittest.TestCase):
         self.assertEqual(len(t), 2)
         self.assertNotIn("CLAUDE.md", [x["path"] for x in t])
 
+    def test_sample_skips_binary_files(self):
+        for i in range(6):
+            (self.root / f"code/blob{i}.zip").write_bytes(b"PK\x03\x04\x00\x00binary")
+        self.wb("survey")
+        self.wb("eval", "sample", "--n", "20", "--seed", "1")
+        paths = [x["path"] for x in json.loads((self.root / "world/.eval/targets.json").read_text())["targets"]]
+        self.assertIn("code/x.py", paths)
+        self.assertFalse([p for p in paths if p.endswith(".zip")])
+
     def test_run_and_score_with_stub(self):
         self.add_world()
         out = Path(self.tmp.name) / "eval"

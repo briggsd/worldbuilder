@@ -593,6 +593,14 @@ def cmd_eval_prepare(args):
     print(out)
 
 
+def is_binary(path):
+    try:
+        with open(path, "rb") as fh:
+            return b"\0" in fh.read(4096)
+    except OSError:
+        return True
+
+
 def cmd_eval_sample(args):
     root = Path(args.root).resolve() if args.root else find_root()
     cfg = load_config(root)
@@ -608,6 +616,8 @@ def cmd_eval_sample(args):
         if excluded(f, skip) or f.rsplit("/", 1)[-1] in TRAILHEAD_NAMES or f in survey["trailheads"]:
             continue
         if rec["md"] and not rec.get("headings"):
+            continue
+        if not rec["md"] and is_binary(root / f):
             continue
         area = next((a["id"] for a in sorted(survey["areas"], key=lambda a: -len(a["path"]))
                      if a["path"] == "." and "/" not in f or under(f, a["path"])), "root")
@@ -628,6 +638,7 @@ def cmd_eval_sample(args):
         if rec["md"]:
             parsed = parse_md(text)
             hs = [h for h in parsed["headings"] if h[0] in (2, 3)] or parsed["headings"]
+            hs = [h for h in hs if len(section_text(text, h[2]).splitlines()) > 2] or hs
             if hs:
                 h = rng.choice(hs)
                 heading, excerpt = h[1], section_text(text, h[2])
