@@ -491,8 +491,8 @@ def check_world(root, files, parsed, edges, territory):
     world_md = f"{WORLD_DIR}/WORLD.md"
     if world_md not in files:
         issues.append("world/WORLD.md is missing")
-    area_maps = [f for f in files if under(f, WORLD_DIR) and f.lower().endswith(".md") and f != world_md
-                 and not f.rsplit("/", 1)[-1].startswith((".", "_"))]
+    area_maps = [f for f in files if f.count("/") == 1 and under(f, WORLD_DIR) and f.lower().endswith(".md")
+                 and f != world_md and not f.rsplit("/", 1)[-1].startswith((".", "_"))]
     linked_from_world = {e["target"] for e in edges if e["src"] == world_md and e["kind"] == "file"}
     covered_by_maps = []
     for m in area_maps:

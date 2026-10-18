@@ -122,6 +122,13 @@ class WorldbuilderTest(unittest.TestCase):
         r = self.check()
         self.assertEqual(r["world"]["maps"][0]["changed_since_built"], 0)
 
+    def test_eval_reports_are_not_area_maps(self):
+        self.add_world()
+        self.write("world/.eval/report-2026-01-01.md", "# worldbuilder eval\n")
+        r = self.check()
+        self.assertEqual([m["map"] for m in r["world"]["maps"]], ["world/notes.md"])
+        self.assertEqual(r["world"]["issues"], [])
+
     def test_world_broken_road_fails_strict(self):
         self.add_world(map_body="- **Ghost**: gone. [[notes/ghost]]\n")
         self.assertEqual(self.wb("check", "--strict", check=False).returncode, 1)
