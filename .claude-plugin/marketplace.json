@@ -1,0 +1,14 @@
+{
+  "name": "worldbuilder",
+  "description": "World maps for agent onboarding.",
+  "owner": {
+    "name": "briggsd"
+  },
+  "plugins": [
+    {
+      "name": "worldbuilder",
+      "source": "./",
+      "description": "Build a world map of a project so agents find existing work before rebuilding it."
+    }
+  ]
+}

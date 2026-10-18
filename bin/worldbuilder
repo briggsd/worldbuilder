@@ -1,0 +1,861 @@
+#!/usr/bin/env python3
+"""worldbuilder: survey, reachability check, and eval for a project's world map.
+
+The world lives in <project>/world/: WORLD.md (the wide-angle map) and one map
+per area. Agents write the maps. This CLI does the parts that must be exact:
+listing the territory, following links from the trailheads, finding broken
+roads and stale maps, and running the with/without-world eval.
+"""
+
+import argparse
+import fnmatch
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import unquote
+
+VERSION = "0.1.0"
+WORLD_DIR = "world"
+ROUTER_DIR = ".claude/skills/world"
+MARK_START = "<!-- worldbuilder:start -->"
+MARK_END = "<!-- worldbuilder:end -->"
+TRAILHEAD_NAMES = ("AGENTS.md", "CLAUDE.md")
+MD_EXT = (".md", ".markdown")
+DEFAULT_EXCLUDES = [
+    ".git/", "node_modules/", ".obsidian/", ".venv/", "venv/", "__pycache__/",
+    ".next/", "dist/", "build/", "target/", ".trash/", ".DS_Store", "*.pyc",
+]
+DEFAULT_AREA_MAX_FILES = 60
+DEFAULT_MAX_HOPS = 3
+
+
+class WorldError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- project
+
+def find_root(start=None):
+    p = Path(start or os.getcwd()).resolve()
+    for d in (p, *p.parents):
+        if (d / WORLD_DIR / "config.json").exists() or (d / WORLD_DIR / "WORLD.md").exists():
+            return d
+    return p
+
+
+def load_config(root):
+    cfg = {"exclude": [], "trailheads": [], "area_max_files": DEFAULT_AREA_MAX_FILES,
+           "max_hops": DEFAULT_MAX_HOPS, "eval_exclude": []}
+    f = root / WORLD_DIR / "config.json"
+    if f.exists():
+        cfg.update(json.loads(f.read_text()))
+    return cfg
+
+
+def excluded(path, patterns):
+    name = path.rsplit("/", 1)[-1]
+    for p in patterns:
+        if p.endswith("/"):
+            if path.startswith(p) or ("/" + p) in ("/" + path):
+                return True
+        elif fnmatch.fnmatch(path, p) or fnmatch.fnmatch(name, p):
+            return True
+    return False
+
+
+def list_files(root, patterns):
+    try:
+        out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=root,
+                             capture_output=True, check=True).stdout.decode("utf-8", "replace")
+        files = [f for f in out.split("\0") if f]
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        files = []
+        for d, dirs, names in os.walk(root):
+            rel = os.path.relpath(d, root)
+            rel = "" if rel == "." else rel + "/"
+            dirs[:] = [x for x in dirs if not excluded(rel + x + "/", patterns)]
+            files += [rel + n for n in names]
+    return sorted(f for f in files if not excluded(f, patterns) and (root / f).is_file())
+
+
+def is_git(root):
+    r = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=root, capture_output=True)
+    return r.returncode == 0
+
+
+def now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def parse_iso(s):
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+# ---------------------------------------------------------------- markdown
+
+FENCE = re.compile(r"^\s*(```|~~~)")
+HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+WIKI = re.compile(r"!?\[\[([^\]|#]*)(?:#([^\]|]*))?(?:\|[^\]]*)?\]\]")
+MDLINK = re.compile(r"!?\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+INLINE_CODE = re.compile(r"`[^`\n]*`")
+SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def parse_frontmatter(lines):
+    """Flat YAML subset: `key: value`, `key: [a, b]`, and `key:` followed by `- item` lines."""
+    fm, end = {}, 0
+    if not lines or lines[0].strip() != "---":
+        return fm, 0
+    key = None
+    for i, line in enumerate(lines[1:], 1):
+        if line.strip() == "---":
+            end = i + 1
+            break
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if m:
+            key, val = m.group(1), m.group(2).strip()
+            if val.startswith("[") and val.endswith("]"):
+                fm[key] = [v.strip().strip("\"'") for v in val[1:-1].split(",") if v.strip()]
+            elif val:
+                fm[key] = val.strip("\"'")
+            else:
+                fm[key] = []
+        elif key and re.match(r"^\s*-\s+", line) and isinstance(fm.get(key), list):
+            fm[key].append(re.sub(r"^\s*-\s+", "", line).strip().strip("\"'"))
+    else:
+        return {}, 0
+    return fm, end
+
+
+def parse_md(text):
+    lines = text.splitlines()
+    fm, start = parse_frontmatter(lines)
+    headings, links, in_fence = [], [], False
+    for n, line in enumerate(lines[start:], start + 1):
+        if FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        h = HEADING.match(line)
+        if h:
+            headings.append((len(h.group(1)), h.group(2).strip(), n))
+        body = INLINE_CODE.sub("", line)
+        for m in WIKI.finditer(body):
+            links.append({"kind": "wiki", "target": m.group(1).rstrip("\\").strip(),
+                          "anchor": (m.group(2) or "").rstrip("\\").strip(), "line": n})
+        for m in MDLINK.finditer(WIKI.sub("", body)):
+            t = m.group(1)
+            path, _, anchor = t.partition("#")
+            links.append({"kind": "md", "target": path, "anchor": anchor, "line": n, "raw": t})
+    return {"frontmatter": fm, "headings": headings, "links": links}
+
+
+def norm_heading(s):
+    return re.sub(r"[^a-z0-9]+", "", unquote(s).lower())
+
+
+def section_text(text, heading_line, limit=800):
+    lines = text.splitlines()
+    level = None
+    out = []
+    for i, line in enumerate(lines[heading_line - 1:], heading_line):
+        h = HEADING.match(line)
+        if h:
+            if level is None:
+                level = len(h.group(1))
+            elif len(h.group(1)) <= level:
+                break
+        out.append(line)
+        if sum(len(x) for x in out) > limit:
+            break
+    return "\n".join(out)[:limit]
+
+
+# ---------------------------------------------------------------- link graph
+
+class Index:
+    def __init__(self, files):
+        self.files = set(files)
+        self.lower = {f.lower(): f for f in files}
+        self.dirs = set()
+        self.by_stem = {}
+        for f in files:
+            parts = f.split("/")
+            for i in range(1, len(parts)):
+                self.dirs.add("/".join(parts[:i]))
+            stem = parts[-1]
+            for ext in MD_EXT:
+                if stem.lower().endswith(ext):
+                    stem = stem[: -len(ext)]
+            self.by_stem.setdefault(stem.lower(), []).append(f)
+            self.by_stem.setdefault(parts[-1].lower(), []).append(f)
+
+    def _file(self, p):
+        p = os.path.normpath(p).replace("\\", "/")
+        if p.startswith("../") or p == "..":
+            return None
+        for cand in (p, p + ".md"):
+            if cand in self.files:
+                return cand
+            if cand.lower() in self.lower:
+                return self.lower[cand.lower()]
+        return None
+
+    def _dir(self, p):
+        p = os.path.normpath(p).replace("\\", "/").rstrip("/")
+        return p if p in self.dirs else None
+
+    def resolve(self, src, link):
+        """Return (kind, target): kind is file, dir, self, external, or dead."""
+        target = unquote(link["target"])
+        if link["kind"] == "md":
+            if not target:
+                return ("self", src)
+            if SCHEME.match(target):
+                return ("external", target)
+            base = target.lstrip("/") if target.startswith("/") else os.path.join(os.path.dirname(src), target)
+            f = self._file(base)
+            if f:
+                return ("file", f)
+            d = self._dir(base)
+            if d:
+                return ("dir", d)
+            if os.path.normpath(base).startswith(".."):
+                return ("external", target)
+            return ("dead", target)
+        # wiki: path from root, path from source dir, path suffix, then bare name
+        if not target:
+            return ("self", src)
+        for base in (target, os.path.join(os.path.dirname(src), target)):
+            f = self._file(base)
+            if f:
+                return ("file", f)
+        tl = target.lower().strip("/")
+        suffix = [f for f in self.files if f.lower().endswith("/" + tl) or f.lower().endswith("/" + tl + ".md")]
+        if suffix:
+            return ("file", min(suffix, key=len))
+        named = self.by_stem.get(tl.rsplit("/", 1)[-1], [])
+        if named and "/" not in tl:
+            return ("file", min(named, key=len))
+        for base in (target, os.path.join(os.path.dirname(src), target)):
+            d = self._dir(base)
+            if d:
+                return ("dir", d)
+        return ("dead", target)
+
+
+def read_text(root, f):
+    try:
+        return (root / f).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def build_graph(root, files):
+    idx = Index(files)
+    parsed, edges = {}, []
+    for f in files:
+        if f.lower().endswith(MD_EXT):
+            parsed[f] = parse_md(read_text(root, f))
+    for f, p in parsed.items():
+        for link in p["links"]:
+            kind, target = idx.resolve(f, link)
+            e = {"src": f, "line": link["line"], "kind": kind, "target": target,
+                 "anchor": link["anchor"], "anchor_ok": True}
+            if kind in ("file", "self") and link["anchor"] and not link["anchor"].startswith("^"):
+                tp = parsed.get(target)
+                if tp is not None:
+                    e["anchor_ok"] = any(norm_heading(h[1]) == norm_heading(link["anchor"]) for h in tp["headings"])
+            edges.append(e)
+    return idx, parsed, edges
+
+
+def default_trailheads(root, files, cfg):
+    if cfg.get("trailheads"):
+        return [t for t in cfg["trailheads"] if t in files]
+    heads = [n for n in TRAILHEAD_NAMES if n in files]
+    heads += [f for f in files if re.match(r"^\.claude/skills/[^/]+/SKILL\.md$", f)]
+    return heads
+
+
+def reach(files, edges, heads):
+    """Hop count from the trailheads. A nested AGENTS.md/CLAUDE.md is loaded by the harness
+    when the agent works in its directory, so it is reached at the same depth as the file."""
+    out = {}
+    for e in edges:
+        out.setdefault(e["src"], []).append(e)
+    fileset = set(files)
+    depth, covered, queue = {}, {}, []
+
+    def visit(f, d):
+        if f in depth and depth[f] <= d:
+            return
+        depth[f] = d
+        queue.append(f)
+        parts = f.split("/")[:-1]
+        for i in range(len(parts), 0, -1):
+            for n in TRAILHEAD_NAMES:
+                c = "/".join(parts[:i] + [n])
+                if c in fileset and (c not in depth or depth[c] > d):
+                    visit(c, d)
+
+    for h in heads:
+        visit(h, 0)
+    while queue:
+        queue.sort(key=lambda f: depth[f])
+        f = queue.pop(0)
+        for e in out.get(f, []):
+            if e["kind"] == "file":
+                visit(e["target"], depth[f] + 1)
+            elif e["kind"] == "dir":
+                d = depth[f] + 1
+                if e["target"] not in covered or covered[e["target"]] > d:
+                    covered[e["target"]] = d
+    return depth, covered
+
+
+def under(path, d):
+    return path == d or path.startswith(d.rstrip("/") + "/")
+
+
+# ---------------------------------------------------------------- survey
+
+def propose_areas(files, max_files):
+    def split(prefix, fs, level):
+        groups = {}
+        for f in fs:
+            rest = f[len(prefix):] if prefix else f
+            key = rest.split("/", 1)[0] if "/" in rest else ""
+            groups.setdefault(key, []).append(f)
+        areas = []
+        for key, members in sorted(groups.items()):
+            path = (prefix + key) if key else (prefix.rstrip("/") or ".")
+            if key and len(members) > max_files and level < 3 and len({m[len(prefix + key) + 1:].split("/", 1)[0] for m in members if m.count("/") > (prefix + key).count("/") + 1}) > 1:
+                areas += split(prefix + key + "/", members, level + 1)
+            else:
+                areas.append((path, members))
+        return areas
+
+    out = []
+    for path, members in split("", files, 1):
+        out.append({"id": area_id(path), "path": path, "files": len(members),
+                    "md": sum(1 for m in members if m.lower().endswith(MD_EXT)),
+                    "sample": members[:8]})
+    return out
+
+
+def area_id(path):
+    if path in (".", ""):
+        return "root"
+    s = re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-")
+    return s or "root"
+
+
+def cmd_survey(args):
+    root = Path(args.root).resolve() if args.root else find_root()
+    cfg = load_config(root)
+    patterns = DEFAULT_EXCLUDES + cfg["exclude"] + [WORLD_DIR + "/", ROUTER_DIR + "/"]
+    files = list_files(root, patterns)
+    if not files:
+        raise WorldError(f"no files found under {root}")
+    idx, parsed, edges = build_graph(root, files)
+    skills = []
+    for f in files:
+        if re.match(r"^\.claude/skills/[^/]+/SKILL\.md$", f):
+            fm = parsed[f]["frontmatter"]
+            skills.append({"path": f, "name": fm.get("name", f.split("/")[2]),
+                           "description": str(fm.get("description", ""))[:300]})
+    inbound = {}
+    for e in edges:
+        if e["kind"] == "file" and e["target"] != e["src"]:
+            inbound[e["target"]] = inbound.get(e["target"], 0) + 1
+    entries = []
+    for f in files:
+        rec = {"path": f, "bytes": (root / f).stat().st_size, "md": f in parsed,
+               "links_in": inbound.get(f, 0)}
+        if f in parsed:
+            p = parsed[f]
+            rec["title"] = p["frontmatter"].get("title") if isinstance(p["frontmatter"].get("title"), str) else None
+            rec["headings"] = [[h[0], h[1]] for h in p["headings"][:40]]
+            rec["links_out"] = len(p["links"])
+        entries.append(rec)
+    survey = {
+        "version": VERSION, "root": str(root), "generated": now_iso(), "git": is_git(root),
+        "link_style": "wiki" if (root / ".obsidian").is_dir() or _wiki_share(parsed) > 0.5 else "markdown",
+        "file_count": len(files), "md_count": len(parsed),
+        "trailheads": default_trailheads(root, files, cfg),
+        "skills": skills,
+        "areas": propose_areas(files, cfg["area_max_files"]),
+        "files": entries,
+    }
+    out = root / WORLD_DIR / ".survey.json"
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(survey, indent=1))
+    print(f"surveyed {survey['file_count']} files ({survey['md_count']} markdown) in {root}")
+    print(f"link style: {survey['link_style']}   git: {survey['git']}")
+    print(f"trailheads: {', '.join(survey['trailheads']) or 'none'}")
+    print(f"project skills: {len(skills)}")
+    print(f"proposed areas ({len(survey['areas'])}):")
+    for a in survey["areas"]:
+        print(f"  {a['id']:<36} {a['path']:<40} {a['files']:>5} files  {a['md']:>4} md")
+    print(f"wrote {out.relative_to(root)}")
+
+
+def _wiki_share(parsed):
+    kinds = [l["kind"] for p in parsed.values() for l in p["links"] if not SCHEME.match(l["target"] or "")]
+    return sum(1 for k in kinds if k == "wiki") / len(kinds) if kinds else 0
+
+
+# ---------------------------------------------------------------- check
+
+def cmd_check(args):
+    root = Path(args.root).resolve() if args.root else find_root()
+    cfg = load_config(root)
+    max_hops = args.max_hops or cfg["max_hops"]
+    files = list_files(root, DEFAULT_EXCLUDES + cfg["exclude"])
+    idx, parsed, edges = build_graph(root, files)
+    heads = default_trailheads(root, files, cfg)
+    depth, covered = reach(files, edges, heads)
+
+    world_files = [f for f in files if under(f, WORLD_DIR) or under(f, ROUTER_DIR)]
+    territory = [f for f in files if f not in world_files]
+    status = {}
+    for f in territory:
+        if f in depth:
+            status[f] = "linked"
+        elif any(under(f, d) for d in covered):
+            status[f] = "dir"
+        else:
+            status[f] = "unreachable"
+
+    def pct(fs, ok):
+        return round(100 * sum(1 for f in fs if status[f] in ok) / len(fs), 1) if fs else 100.0
+
+    md = [f for f in territory if f.lower().endswith(MD_EXT)]
+    unreachable = [f for f in territory if status[f] == "unreachable"]
+    by_dir = {}
+    for f in unreachable:
+        by_dir.setdefault(f.rsplit("/", 1)[0] if "/" in f else ".", []).append(f)
+    dead = [e for e in edges if e["kind"] == "dead"]
+    bad_anchor = [e for e in edges if not e["anchor_ok"]]
+    inbound = {e["target"] for e in edges if e["kind"] == "file" and e["target"] != e["src"]}
+    orphans = [f for f in md if f not in inbound and f not in heads and f.rsplit("/", 1)[-1] not in TRAILHEAD_NAMES]
+    deep = sorted((f for f in territory if f in depth and depth[f] > max_hops), key=lambda f: -depth[f])
+    hist = {}
+    for f in territory:
+        if f in depth:
+            hist[depth[f]] = hist.get(depth[f], 0) + 1
+
+    has_world = any(under(f, WORLD_DIR) and f.lower().endswith(".md") for f in files)
+    world = check_world(root, files, parsed, edges, territory) if has_world else None
+    report = {
+        "version": VERSION, "checked": now_iso(), "trailheads": heads,
+        "territory_files": len(territory), "markdown_files": len(md),
+        "reach_md_pct": pct(md, {"linked"}),
+        "reach_all_pct": pct(territory, {"linked", "dir"}),
+        "hops": {str(k): v for k, v in sorted(hist.items())}, "max_hops": max_hops,
+        "deep": [{"path": f, "hops": depth[f]} for f in deep],
+        "unreachable": {d: fs for d, fs in sorted(by_dir.items())},
+        "dead_links": [{"src": e["src"], "line": e["line"], "target": e["target"]} for e in dead],
+        "dead_anchors": [{"src": e["src"], "line": e["line"], "target": e["target"], "anchor": e["anchor"]} for e in bad_anchor],
+        "orphans": orphans,
+        "world": world,
+    }
+    if (root / WORLD_DIR).is_dir():
+        tmp = root / WORLD_DIR / f".check.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(report, indent=1))
+        tmp.replace(root / WORLD_DIR / ".check.json")
+    if args.json:
+        print(json.dumps(report, indent=1))
+    else:
+        print_check(report)
+    if args.strict and world and (world["issues"] or world["dead_links"]):
+        sys.exit(1)
+
+
+def check_world(root, files, parsed, edges, territory):
+    issues, maps = [], []
+    world_md = f"{WORLD_DIR}/WORLD.md"
+    if world_md not in files:
+        issues.append("world/WORLD.md is missing")
+    area_maps = [f for f in files if under(f, WORLD_DIR) and f.lower().endswith(".md") and f != world_md
+                 and not f.rsplit("/", 1)[-1].startswith((".", "_"))]
+    linked_from_world = {e["target"] for e in edges if e["src"] == world_md and e["kind"] == "file"}
+    covered_by_maps = []
+    for m in area_maps:
+        fm = parsed[m]["frontmatter"]
+        covers = fm.get("covers") or []
+        covers = [covers] if isinstance(covers, str) else covers
+        built = parse_iso(fm.get("built", ""))
+        missing = [k for k in ("area", "covers", "built") if not fm.get(k)]
+        if missing:
+            issues.append(f"{m}: frontmatter missing {', '.join(missing)}")
+        if world_md in files and m not in linked_from_world:
+            issues.append(f"{m}: not linked from WORLD.md")
+        in_scope = [f for f in territory if any(under(f, c.strip("/")) or c in (".", "") and "/" not in f for c in covers)]
+        covered_by_maps += in_scope
+        stale = []
+        if built:
+            stale = [f for f in in_scope if (root / f).stat().st_mtime > built + 1]
+        entries = sum(1 for e in edges if e["src"] == m and e["kind"] in ("file", "dir"))
+        maps.append({"map": m, "covers": covers, "built": fm.get("built"), "files": len(in_scope),
+                     "changed_since_built": len(stale), "changed": stale[:20], "links": entries,
+                     "lines": len(read_text(root, m).splitlines())})
+    uncovered = sorted(set(territory) - set(covered_by_maps))
+    world_dead = [{"src": e["src"], "line": e["line"], "target": e["target"], "anchor": e["anchor"]}
+                  for e in edges if under(e["src"], WORLD_DIR) or under(e["src"], ROUTER_DIR)
+                  if e["kind"] == "dead" or not e["anchor_ok"]]
+    return {"maps": maps, "issues": issues, "dead_links": world_dead,
+            "uncovered_count": len(uncovered), "uncovered": uncovered[:50],
+            "world_lines": len(read_text(root, world_md).splitlines()) if world_md in files else 0}
+
+
+def print_check(r):
+    print(f"trailheads: {', '.join(r['trailheads']) or 'NONE'}")
+    print(f"territory: {r['territory_files']} files, {r['markdown_files']} markdown")
+    print(f"reachable by link from a trailhead: {r['reach_md_pct']}% of markdown")
+    print(f"reachable by link or linked directory: {r['reach_all_pct']}% of all files")
+    print(f"hops: " + "  ".join(f"{k}:{v}" for k, v in r["hops"].items()))
+    print(f"deeper than {r['max_hops']} hops: {len(r['deep'])}")
+    n_un = sum(len(v) for v in r["unreachable"].values())
+    print(f"unreachable: {n_un} files in {len(r['unreachable'])} directories")
+    for d, fs in sorted(r["unreachable"].items(), key=lambda kv: -len(kv[1]))[:12]:
+        print(f"  {len(fs):>4}  {d}/")
+    print(f"dead links: {len(r['dead_links'])}   dead heading anchors: {len(r['dead_anchors'])}   orphans: {len(r['orphans'])}")
+    w = r["world"]
+    if w is None:
+        print("world: none yet (run the worldbuilder skill)")
+        return
+    print(f"world: WORLD.md {w['world_lines']} lines, {len(w['maps'])} area maps, "
+          f"{w['uncovered_count']} files outside every map's covers")
+    for m in w["maps"]:
+        flag = f"  STALE ({m['changed_since_built']} changed)" if m["changed_since_built"] else ""
+        print(f"  {m['map']:<40} {m['files']:>4} files  {m['links']:>3} links  {m['lines']:>4} lines{flag}")
+    for i in w["issues"]:
+        print(f"  issue: {i}")
+    for e in w["dead_links"][:20]:
+        print(f"  broken road in map: {e['src']}:{e['line']} -> {e['target']}{'#' + e['anchor'] if e['anchor'] else ''}")
+
+
+# ---------------------------------------------------------------- eval
+
+def strip_world_block(text):
+    return re.sub(re.escape(MARK_START) + r".*?" + re.escape(MARK_END) + r"\n?", "", text, flags=re.S)
+
+
+def cmd_eval_prepare(args):
+    root = Path(args.root).resolve() if args.root else find_root()
+    cfg = load_config(root)
+    files = list_files(root, DEFAULT_EXCLUDES + cfg["exclude"])
+    if f"{WORLD_DIR}/WORLD.md" not in files:
+        raise WorldError("world/WORLD.md not found. Build the world before preparing an eval.")
+    out = Path(args.out).resolve() if args.out else Path(tempfile.mkdtemp(prefix="worldbuilder-eval-"))
+    if under(str(out), str(root)):
+        raise WorldError("--out must be outside the project")
+    for parent in out.parents:
+        for n in TRAILHEAD_NAMES:
+            if (parent / n).exists():
+                raise WorldError(f"{parent / n} would load into every eval run. Choose --out outside any project.")
+    for arm in ("world", "baseline"):
+        d = out / arm
+        if d.exists():
+            shutil.rmtree(d)
+        for f in files:
+            if f.startswith(WORLD_DIR + "/.eval/"):
+                continue
+            if arm == "baseline" and (under(f, WORLD_DIR) or under(f, ROUTER_DIR)):
+                continue
+            dst = d / f
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if arm == "baseline" and f.rsplit("/", 1)[-1] in TRAILHEAD_NAMES:
+                dst.write_text(strip_world_block(read_text(root, f)))
+            else:
+                shutil.copy2(root / f, dst)
+    (out / "manifest.json").write_text(json.dumps({"root": str(root), "created": now_iso(), "files": len(files)}, indent=1))
+    print(out)
+
+
+def cmd_eval_sample(args):
+    root = Path(args.root).resolve() if args.root else find_root()
+    cfg = load_config(root)
+    sf = root / WORLD_DIR / ".survey.json"
+    if not sf.exists():
+        raise WorldError("run `worldbuilder survey` first")
+    survey = json.loads(sf.read_text())
+    rng = random.Random(args.seed)
+    skip = DEFAULT_EXCLUDES + cfg["exclude"] + cfg["eval_exclude"]
+    pool = {}
+    for rec in survey["files"]:
+        f = rec["path"]
+        if excluded(f, skip) or f.rsplit("/", 1)[-1] in TRAILHEAD_NAMES or f in survey["trailheads"]:
+            continue
+        if rec["md"] and not rec.get("headings"):
+            continue
+        area = next((a["id"] for a in sorted(survey["areas"], key=lambda a: -len(a["path"]))
+                     if a["path"] == "." and "/" not in f or under(f, a["path"])), "root")
+        pool.setdefault(area, []).append(rec)
+    areas = sorted(pool)
+    rng.shuffle(areas)
+    for a in areas:
+        rng.shuffle(pool[a])
+    picks = []
+    while len(picks) < args.n and any(pool.values()):
+        for a in areas:
+            if pool[a] and len(picks) < args.n:
+                picks.append((a, pool[a].pop()))
+    targets = []
+    for i, (area, rec) in enumerate(picks, 1):
+        text = read_text(root, rec["path"])
+        heading, excerpt = None, text[:800]
+        if rec["md"]:
+            parsed = parse_md(text)
+            hs = [h for h in parsed["headings"] if h[0] in (2, 3)] or parsed["headings"]
+            if hs:
+                h = rng.choice(hs)
+                heading, excerpt = h[1], section_text(text, h[2])
+        targets.append({"id": f"p{i:02d}", "area": area, "path": rec["path"], "heading": heading,
+                        "excerpt": excerpt})
+    out = root / WORLD_DIR / ".eval" / "targets.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"seed": args.seed, "targets": targets}, indent=1))
+    print(f"sampled {len(targets)} targets across {len({t['area'] for t in targets})} areas -> {out.relative_to(root)}")
+
+
+PROMPT = """You are working in this project. A teammate asks:
+
+"{question}"
+
+Before anyone builds anything, find out whether the project already has what they need. Investigate the project files and leave every file unchanged.
+
+End your reply with one JSON object on its own line, in this shape:
+{{"existing": true, "found": ["path/relative/to/project.md#Optional heading"], "answer": "one or two sentences"}}
+Set "existing" to false when nothing relevant exists. List in "found" only files you opened and confirmed are relevant, most relevant first, at most 5.
+"""
+
+
+def claude_cmd(args):
+    cmd = [os.environ.get("WORLDBUILDER_CLAUDE", "claude"), "-p", "--output-format", "json",
+           "--no-session-persistence", "--max-turns", str(args.max_turns),
+           "--allowedTools", "Read,Grep,Glob,Skill"]
+    if args.model:
+        cmd += ["--model", args.model]
+    if not args.user_settings:
+        cmd += ["--setting-sources", "project,local"]
+    return cmd
+
+
+def cmd_eval_run(args):
+    d = Path(args.dir).resolve()
+    probes = json.loads(Path(args.probes).read_text())["probes"]
+    arms = args.arms.split(",")
+    for arm in arms:
+        if not (d / arm).is_dir():
+            raise WorldError(f"{d / arm} missing. Run `worldbuilder eval prepare` first.")
+    res = d / "results"
+    res.mkdir(exist_ok=True)
+    jobs = [(p, arm, t) for p in probes for arm in arms for t in range(1, args.trials + 1)
+            if not (res / f"{p['id']}-{arm}-{t}.json").exists()]
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+    base = claude_cmd(args)
+    print(f"{len(jobs)} runs to do ({len(probes)} probes x {len(arms)} arms x {args.trials} trials, "
+          f"{len(probes) * len(arms) * args.trials - len(jobs)} already done)", flush=True)
+
+    def run(job):
+        p, arm, t = job
+        start = time.time()
+        try:
+            r = subprocess.run(base, input=PROMPT.format(question=p["question"]), cwd=d / arm, env=env,
+                               capture_output=True, text=True, timeout=args.timeout)
+            rec = {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr[-2000:]}
+        except subprocess.TimeoutExpired:
+            rec = {"returncode": None, "stdout": "", "stderr": f"timeout after {args.timeout}s"}
+        rec.update({"probe": p["id"], "arm": arm, "trial": t, "seconds": round(time.time() - start, 1)})
+        (res / f"{p['id']}-{arm}-{t}.json").write_text(json.dumps(rec, indent=1))
+        print(f"  {p['id']} {arm:<8} trial {t}  rc={rec['returncode']}  {rec['seconds']}s", flush=True)
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+        list(ex.map(run, jobs))
+
+
+ANSWER = re.compile(r"\{[^{}]*\"found\"[^{}]*\}", re.S)
+
+
+def parse_answer(text):
+    for m in reversed(list(ANSWER.finditer(text or ""))):
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def norm_path(s):
+    s = unquote(str(s)).strip().strip("`").strip("[]").strip()
+    s = s.split("#", 1)[0].split("|", 1)[0].strip().lstrip("./").lstrip("/")
+    s = s.lower()
+    for ext in MD_EXT:
+        if s.endswith(ext):
+            s = s[: -len(ext)]
+    return s
+
+
+def score_run(probe, rec):
+    """Return dict with ok (parsed), correct, and cost fields."""
+    out = {"ok": False, "correct": False, "tokens": None, "cost": None, "turns": None, "error": None}
+    try:
+        meta = json.loads(rec["stdout"])
+    except (json.JSONDecodeError, TypeError):
+        out["error"] = (rec.get("stderr") or "no output")[-200:]
+        return out
+    u = meta.get("usage") or {}
+    out["tokens"] = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
+                                                  "cache_read_input_tokens", "output_tokens"))
+    out["cost"] = meta.get("total_cost_usd")
+    out["turns"] = meta.get("num_turns")
+    ans = parse_answer(meta.get("result", ""))
+    if ans is None:
+        out["error"] = f"no answer JSON ({meta.get('subtype') or meta.get('terminal_reason') or 'unknown'})"
+        return out
+    out["ok"] = True
+    found = [norm_path(x) for x in ans.get("found") or []]
+    if probe.get("negative"):
+        out["correct"] = ans.get("existing") is False
+    else:
+        expect = {norm_path(x) for x in probe.get("expect") or []}
+        out["correct"] = any(f in expect for f in found)
+    out["found"] = ans.get("found") or []
+    return out
+
+
+def mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def cmd_eval_score(args):
+    d = Path(args.dir).resolve()
+    probes = json.loads(Path(args.probes).read_text())["probes"]
+    arms = args.arms.split(",")
+    rows, per_arm = [], {a: [] for a in arms}
+    expected = len(probes) * len(arms) * args.trials
+    present = 0
+    for p in probes:
+        row = {"probe": p, "arms": {}}
+        for arm in arms:
+            results = []
+            for t in range(1, args.trials + 1):
+                f = d / "results" / f"{p['id']}-{arm}-{t}.json"
+                if f.exists():
+                    present += 1
+                    s = score_run(p, json.loads(f.read_text()))
+                    results.append(s)
+                    per_arm[arm].append(s)
+            row["arms"][arm] = results
+        rows.append(row)
+
+    lines = ["# worldbuilder eval", "", f"Runs present: {present} of {expected} expected.", ""]
+    lines += ["| arm | runs | parsed | correct | accuracy | mean tokens | mean cost | mean turns |",
+              "|---|---|---|---|---|---|---|---|"]
+    summary = {}
+    for arm in arms:
+        rs = per_arm[arm]
+        ok = [r for r in rs if r["ok"]]
+        correct = sum(1 for r in ok if r["correct"])
+        acc = round(100 * correct / len(rs), 1) if rs else None
+        tok, cost, turns = mean([r["tokens"] for r in rs]), mean([r["cost"] for r in rs]), mean([r["turns"] for r in rs])
+        summary[arm] = {"runs": len(rs), "parsed": len(ok), "correct": correct, "accuracy_pct": acc,
+                        "mean_tokens": tok, "mean_cost": cost, "mean_turns": turns}
+        lines.append(f"| {arm} | {len(rs)} | {len(ok)} | {correct} | {acc}% | "
+                     f"{round(tok) if tok else '-'} | {('$%.4f' % cost) if cost else '-'} | "
+                     f"{round(turns, 1) if turns else '-'} |")
+    lines += ["", "| probe | kind | question | " + " | ".join(arms) + " |", "|---|---|---|" + "---|" * len(arms)]
+    for row in rows:
+        p = row["probe"]
+        cells = []
+        for arm in arms:
+            rs = row["arms"][arm]
+            cells.append(" ".join("✓" if r["correct"] else ("✗" if r["ok"] else "err") for r in rs) or "-")
+        q = p["question"].replace("|", "/")
+        q = q if len(q) <= 90 else q[:87] + "..."
+        lines.append(f"| {p['id']} | {'negative' if p.get('negative') else 'exists'} | {q} | " + " | ".join(cells) + " |")
+    errors = [(row["probe"]["id"], arm, r["error"]) for row in rows for arm in arms for r in row["arms"][arm] if r["error"]]
+    if errors:
+        lines += ["", "## Errors", ""] + [f"- {pid} {arm}: {e}" for pid, arm, e in errors]
+    report = "\n".join(lines) + "\n"
+    (d / "report.md").write_text(report)
+    (d / "summary.json").write_text(json.dumps({"expected": expected, "present": present, "arms": summary}, indent=1))
+    print(report)
+    if present < expected:
+        print(f"WARNING: {expected - present} runs missing. Re-run `worldbuilder eval run` to finish them.")
+
+
+# ---------------------------------------------------------------- main
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="worldbuilder", description=__doc__.split("\n")[0])
+    ap.add_argument("--version", action="version", version=VERSION)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("survey", help="list the territory and propose areas; writes world/.survey.json")
+    s.add_argument("--root")
+    s.set_defaults(func=cmd_survey)
+
+    c = sub.add_parser("check", help="reachability from trailheads, broken roads, stale maps")
+    c.add_argument("--root")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--strict", action="store_true", help="exit 1 when the world itself has issues or broken roads")
+    c.add_argument("--max-hops", type=int)
+    c.set_defaults(func=cmd_check)
+
+    e = sub.add_parser("eval", help="with/without-world eval")
+    esub = e.add_subparsers(dest="eval_cmd", required=True)
+    ep = esub.add_parser("prepare", help="copy the project into world/ and baseline/ arms outside the project")
+    ep.add_argument("--root")
+    ep.add_argument("--out")
+    ep.set_defaults(func=cmd_eval_prepare)
+    es = esub.add_parser("sample", help="pick random existing targets for probes")
+    es.add_argument("--root")
+    es.add_argument("--n", type=int, default=10)
+    es.add_argument("--seed", type=int, default=0)
+    es.set_defaults(func=cmd_eval_sample)
+    er = esub.add_parser("run", help="run every probe in both arms with headless claude")
+    er.add_argument("--dir", required=True)
+    er.add_argument("--probes", required=True)
+    er.add_argument("--arms", default="baseline,world")
+    er.add_argument("--trials", type=int, default=1)
+    er.add_argument("--model")
+    er.add_argument("--max-turns", type=int, default=30)
+    er.add_argument("--jobs", type=int, default=4)
+    er.add_argument("--timeout", type=int, default=600)
+    er.add_argument("--user-settings", action="store_true", help="also load user settings and plugins in each run")
+    er.set_defaults(func=cmd_eval_run)
+    sc = esub.add_parser("score", help="score results and write report.md")
+    sc.add_argument("--dir", required=True)
+    sc.add_argument("--probes", required=True)
+    sc.add_argument("--arms", default="baseline,world")
+    sc.add_argument("--trials", type=int, default=1)
+    sc.set_defaults(func=cmd_eval_score)
+
+    args = ap.parse_args(argv)
+    try:
+        args.func(args)
+    except WorldError as ex:
+        print(f"worldbuilder: {ex}", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

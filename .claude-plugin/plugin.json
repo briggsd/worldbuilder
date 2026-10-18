@@ -1,0 +1,8 @@
+{
+  "name": "worldbuilder",
+  "version": "0.1.0",
+  "description": "Build a world map of a project (repo, docs, Obsidian vault) so agents find existing work before rebuilding it. Survey, area maps, router skill and trailhead, reachability check, and a with/without-world eval.",
+  "author": {
+    "name": "briggsd"
+  }
+}
