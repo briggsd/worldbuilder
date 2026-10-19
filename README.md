@@ -4,16 +4,16 @@ A Claude Code plugin that builds a **world** for a project: a wide, shallow map 
 
 It implements the world-building model from OpenRig's [How My AI Civilization Actually Works](https://www.youtube.com/watch?v=CYRJDTcTKhQ). Agents fail at onboarding before they search, because they don't know what to search for. The fix is a map that names everything at shallow depth (width for depth), with a traceable route from boot to every piece of knowledge (route-to-leaf reachability).
 
-## The model, and what v1 builds
+## The model, and what worldbuilder builds
 
-The OpenRig model arranges a project's knowledge along four dimensions. worldbuilder v1 builds the first two.
+The OpenRig model arranges a project's knowledge along four dimensions. worldbuilder builds the first three.
 
-| Dimension | Question it answers | In v1 |
+| Dimension | Question it answers | Status |
 |---|---|---|
 | Map (ontology) | What exists, and where? | Built: WORLD.md and the area maps |
 | Navigation (topology) | How does an agent get from boot to it? | Built: trailhead, router skill, links, and `worldbuilder check` |
-| Elevation (epistemology) | How established is it? Canon, insight, field note, observation, raw data | Not built, planned for v2. See [Elevation](#elevation-the-levels-of-knowledge) |
-| Time and lore | What happened, and what did we learn from it? | Not built, planned for v2. See [Lore](#lore) |
+| Elevation (epistemology) | How established is it? Canon, insight, field note, observation, raw data | Built: level tags on entries and Canon sections. See [Elevation](#elevation-the-levels-of-knowledge) |
+| Time and lore | What happened, and what did we learn from it? | Not built yet. See [Lore](#lore) |
 
 ## What it builds: the layers of the map
 
@@ -23,8 +23,8 @@ The map has five layers. Each one is wider and shallower than the files it point
 |---|---|---|---|
 | 1. Trailhead | Marked block in `CLAUDE.md` or `AGENTS.md` | 4 lines | Tells every new session the map exists. Applied only after you approve it |
 | 2. Router skill | `.claude/skills/world/SKILL.md` | Description under 60 words | Keeps the map findable mid-session and after compaction, when the trailhead has scrolled out of context |
-| 3. World page | `world/WORLD.md` | At most 120 lines | The whole project on one page: every area, its landmarks, the highways between areas, and the edges |
-| 4. Area maps | `world/<area>.md` | At most 100 lines each | Every entity in one area, one line each, linked to its file or heading |
+| 3. World page | `world/WORLD.md` | At most 140 lines | The whole project on one page: project-wide canon, every area, its landmarks, the highways between areas, and the edges |
+| 4. Area maps | `world/<area>.md` | At most 120 lines each | Every entity in one area, one line each, linked to its file or heading |
 | 5. Territory | The project's own files | Unchanged | Where the detail lives. The world never copies it |
 
 ### 1. Trailhead
@@ -37,9 +37,10 @@ A skill named `world` whose description starts "Map of <project>" and names the 
 
 ### 3. World page
 
-`WORLD.md` is the top of the map. It has four parts:
+`WORLD.md` is the top of the map. It has five parts:
 
-- **How to use this map**: three rules for the agent reading it.
+- **How to use this map**: four rules for the agent reading it, including how to read level tags.
+- **Canon**: the rules that hold across areas. See [Elevation](#elevation-the-levels-of-knowledge).
 - **Areas**: a table with one row per area map, a one-line description, and 2 to 4 landmark links, so an agent can jump straight to the most important files.
 - **Highways**: 3 to 8 routes that cross areas, such as a workflow, a data flow, or a pipeline. Each one names its start and its end. In a code repo, "add a resource type" runs from the model through the service and the API to the UI.
 - **Edges**: what the map leaves out on purpose (generated output, archives, vendored code, migrations) and how to search it.
@@ -49,6 +50,7 @@ A skill named `world` whose description starts "Map of <project>" and names the 
 One map per area agreed during the survey. Each map has the same sections:
 
 - **Landmarks**: the 3 to 7 things an agent most needs to know exist here. Each one has a "Use when" line phrased as the task someone would ask for. That line is what stops an agent rebuilding the entity.
+- **Canon**: the rules for working in this area, each with its source and evidence.
 - **Everything else**: one line per remaining entity, grouped under subheadings when there are more than 15.
 - **Routes out**: links to other area maps, and why a task here leads there.
 - **Edges**: files the area covers but doesn't list one by one, and how to find things in them.
@@ -89,13 +91,19 @@ Two rules govern the ladder:
 - **Canon measures how established something is, not how old it is.** A new discovery can become canon at once, while an old pattern can stay a field note because it only applies sometimes.
 - **Higher levels rest on lower ones.** A piece of canon should link down to the insights and observations that justify it, so an agent can check why a rule exists before it bends it.
 
-Without elevation every map entry looks equally trustworthy. An agent can't tell a stale design note from a rule it must follow. v1 has this gap. The v2 plan is to tag each entry with its level, link canon down to its evidence, and have `worldbuilder check` flag canon that has no support.
+Without elevation every map entry looks equally trustworthy, and an agent can't tell a stale design note from a rule it must follow. worldbuilder adds elevation in three places:
+
+- **Level tags.** Every map entry that points at prose carries a tag after its name: `- **Migration guide** [observation]: ...`. Code and config entries carry none. A doc the code contradicts is tagged `[observation]` and names what supersedes it.
+- **Canon sections.** Each area map and WORLD.md has a `## Canon` section. Each rule is one instruction with a `Source:` link to where it is stated and an `Evidence:` link to the code, tests, CI, or examples that enforce it. Rules are chosen for the traps they prevent: the cases where a stale doc or the obvious approach points the other way.
+- **Checks.** `worldbuilder check` counts tags per level and flags any canon rule that cites no evidence.
+
+Cartographers assign levels by evidence, not tone. A rule is canon when a rules file states it, code or CI enforces it, or every example follows it. To add elevation to a world built before it existed, run the cartographers in `mode: elevate`.
 
 ## Lore
 
 Lore is the fourth dimension: named stories of real failures, passed from one generation of agents to the next. One good story carries a lesson into situations no rule anticipated, and its name works as a shorthand. The OpenRig example is the "doghouse moonbase": an agent asked for a doghouse made one reasonable decision after another and built a moonbase. Saying "moonbase" brings the whole lesson back without retelling it.
 
-v1 builds no lore. The v2 plan is a `world/lore/` folder of short, addressable stories, each linked from the area maps where the failure happens and taught again after compaction.
+worldbuilder builds no lore yet. The plan is a `world/lore/` folder of short, addressable stories, each linked from the area maps where the failure happens and taught again after compaction.
 
 ## Install
 
@@ -124,6 +132,8 @@ The CLI is on the agent's PATH while the plugin is loaded:
 ## The eval
 
 The eval reproduces the failure the world prevents: an agent handed work never thinks to look, and rebuilds what exists. Each probe is a build task ("draft…", "set up…", "write a script that…") whose right starting point already exists in the project. Nobody tells the agent to look. Each task runs in a copy with the world and a copy without it, each run in its own copy-on-write clone so writes never leak between runs. The score comes from the tool trace: did the agent open the existing work (found), did it create files without opening it (rebuilt), and did it use the map. The report also gives a first-pass diagnosis of each world-arm miss.
+
+Canon probes (`"kind": "canon"`) test elevation. Each hands over work that an established rule governs, where a stale doc or older pattern points another way. The score is whether the agent followed the rule (touched the files it requires, wrote what it requires) or was misled (touched the path it rules out).
 
 The older find probes (`"kind": "find"`) ask whether something exists. Asking primes every agent to search, so they mostly measure grep.
 

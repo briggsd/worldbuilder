@@ -4,12 +4,14 @@ The world exists for one failure: an agent handed work never thinks to look, and
 
 Both copies sit outside the project so no parent `CLAUDE.md` leaks in. The baseline copy drops `world/`, `.claude/skills/world/`, and the marked trailhead block. Everything else is identical, including the prompt. Each build-task run gets its own copy-on-write clone of its arm, so one run's writes never reach another, and the clone is deleted afterwards.
 
+Canon probes (`"kind": "canon"`) test elevation. Each one hands over work that an established project rule governs, where a stale doc, an older pattern, or the obvious approach points another way. The score is whether the agent followed the rule: it touched every file the rule requires (`expect`), wrote what the rule requires (`require_text`), and touched nothing the rule rules out (`avoid`, `avoid_text`). The probe writer picks rules from the maps' Canon sections, which is fair here because both arms hold the same territory, rule included. What the world adds is surfacing the rule and marking the stale doc. Canon from the root trailhead is skipped, since every agent loads it.
+
 Find mode (`"kind": "find"`) is the older probe type: it asks whether something exists. Asking primes every agent to search, so on a small project both arms score near 100%. Use it only to check that the map's entries point at the right files.
 
 ## Steps
 
 1. **Sample targets.** `worldbuilder eval sample --n 12 --seed <any int>`. This picks random existing files and headings, spread across areas, from the survey rather than from the maps. Sampling from the maps would only test what the maps already contain. Output: `world/.eval/targets.json`.
-2. **Write probes.** Launch `worldbuilder:world-probe-writer` with the targets path, the output path `world/.eval/probes.json`, and mode `task`. Read the probes. Replace any probe that names its target's file or title, or that asks whether something exists rather than handing over work.
+2. **Write probes.** Launch `worldbuilder:world-probe-writer` with the targets path, the output path `world/.eval/probes.json`, and mode `task`. For canon probes, launch it in mode `canon` with the output path `world/.eval/probes-canon.json` and a probe count. Read each canon probe's rule source and confirm the `expect` files are ones every compliant solution touches. Read the probes. Replace any probe that names its target's file or title, or that asks whether something exists rather than handing over work.
 3. **Prepare arms.** `worldbuilder eval prepare`. It prints the eval directory.
 4. **Confirm cost.** Runs = probes × 2 arms × trials. Build tasks run longer than questions because the agent does the work. Tell the user the run count, the model, and a cost range, and get a yes before running.
 5. **Run.** `worldbuilder eval run --dir <eval dir> --probes world/.eval/probes.json [--model <model>] [--trials N] [--jobs 4]`. Run it in the background. Agents get Read, Grep, Glob, Skill, and Edit/Write inside their clone, and no shell. A rerun skips runs that already have results.
@@ -22,6 +24,7 @@ Before reading anything else, confirm the run happened: "Runs present" equals ex
 - **Found** is the share of runs that opened an expected file. This is the headline number.
 - **Rebuilt** counts runs that created files without ever opening the existing work. This is the failure the world prevents.
 - **Map used** counts runs that opened `world/` or the `world` skill. In the world arm it shows whether the trailhead works at all.
+- **Followed / misled** (canon probes): followed counts runs that did what the rule requires, misled counts runs that took the path the rule rules out. Correct is followed and not misled.
 - **Tokens, cost, turns** show what the world costs. A world that raises found and cuts rebuilt is worth some extra turns.
 - With 12 probes and one trial, a difference of one or two probes is noise. Say so. Recommend `--trials 3` before acting on a small difference.
 
