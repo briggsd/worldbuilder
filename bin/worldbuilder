@@ -398,7 +398,7 @@ def cmd_survey(args):
         entries.append(rec)
     survey = {
         "version": VERSION, "root": str(root), "generated": now_iso(), "git": is_git(root),
-        "link_style": "wiki" if (root / ".obsidian").is_dir() or _wiki_share(parsed) > 0.5 else "markdown",
+        "link_style": cfg.get("link_style", "markdown"),
         "file_count": len(files), "md_count": len(parsed),
         "trailheads": default_trailheads(root, files, cfg),
         "skills": skills,
@@ -416,11 +416,6 @@ def cmd_survey(args):
     for a in survey["areas"]:
         print(f"  {a['id']:<36} {a['path']:<40} {a['files']:>5} files  {a['md']:>4} md")
     print(f"wrote {out.relative_to(root)}")
-
-
-def _wiki_share(parsed):
-    kinds = [l["kind"] for p in parsed.values() for l in p["links"] if not SCHEME.match(l["target"] or "")]
-    return sum(1 for k in kinds if k == "wiki") / len(kinds) if kinds else 0
 
 
 # ---------------------------------------------------------------- check

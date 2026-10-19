@@ -100,6 +100,16 @@ class WorldbuilderTest(unittest.TestCase):
         self.assertEqual(b["title"], "B")
         self.assertEqual(b["links_in"], 2)  # two links from a.md
 
+    def test_survey_link_style_defaults_to_markdown(self):
+        (self.root / ".obsidian").mkdir()
+        self.wb("survey")
+        s = json.loads((self.root / "world" / ".survey.json").read_text())
+        self.assertEqual(s["link_style"], "markdown")
+        self.write("world/config.json", '{"link_style": "wiki"}')
+        self.wb("survey")
+        s = json.loads((self.root / "world" / ".survey.json").read_text())
+        self.assertEqual(s["link_style"], "wiki")
+
     def test_survey_splits_large_directories(self):
         for i in range(5):
             self.write(f"big/one/f{i}.md", "# x\n")

@@ -6,10 +6,10 @@ The governing rule is **width for depth**: name everything, explain little. An e
 
 ## Links
 
-Use the style `survey.link_style` reports, so the map renders where the human already reads the project.
+Use the style `survey.link_style` reports. It is `markdown` unless `world/config.json` sets `"link_style": "wiki"`. Markdown links render in GitHub, editors, terminals, and Obsidian alike. Wiki links render only in Obsidian-style tools.
 
+- `markdown`: `[label](../path/to/file.md#heading-slug)`, relative to the file holding the link. Encode spaces in paths as `%20`. Anchors use GitHub's slug: lowercase, punctuation dropped, spaces to hyphens. Obsidian opens such a link at the top of the file rather than at the heading.
 - `wiki`: `[[path/to/file#Heading|label]]`, path from the project root, no `.md`.
-- `markdown`: `[label](../path/to/file.md#heading-slug)`, relative to `world/`.
 
 Link to the heading when one file holds several entities. Every link must resolve. `worldbuilder check` lists the ones that don't as broken roads.
 
@@ -165,4 +165,4 @@ The trailhead outranks every map, so a stale line in it misleads agents even whe
  "areas": [{"id": "core", "title": "Core", "covers": ["src/core"]}]}
 ```
 
-`exclude` removes paths from the territory entirely. `trailheads` overrides the defaults (root `CLAUDE.md`/`AGENTS.md` and every `.claude/skills/*/SKILL.md`). `areas` records the confirmed area list so a refresh reuses it.
+`link_style` is `markdown` by default. Set it to `wiki` only for a project whose humans read it solely in Obsidian. `exclude` removes paths from the territory entirely. `trailheads` overrides the defaults (root `CLAUDE.md`/`AGENTS.md` and every `.claude/skills/*/SKILL.md`). `areas` records the confirmed area list so a refresh reuses it.
