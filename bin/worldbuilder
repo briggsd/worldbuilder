@@ -676,8 +676,11 @@ def is_task(probe):
 
 
 def claude_cmd(args, task=False):
+    # read-only shell commands are auto-approved even when Bash isn't allowed, and they can reach
+    # outside the copy, so the shell is disallowed outright
     cmd = [os.environ.get("WORLDBUILDER_CLAUDE", "claude"), "-p", "--no-session-persistence",
-           "--max-turns", str(args.max_turns), "--allowedTools", TASK_TOOLS if task else FIND_TOOLS]
+           "--max-turns", str(args.max_turns), "--allowedTools", TASK_TOOLS if task else FIND_TOOLS,
+           "--disallowedTools", "Bash"]
     cmd += ["--output-format", "stream-json", "--verbose"] if task else ["--output-format", "json"]
     if args.model:
         cmd += ["--model", args.model]
@@ -837,8 +840,17 @@ def score_task_run(probe, rec):
     out["turns"] = result.get("num_turns")
     out["ok"] = True
     expect = {norm_path(x) for x in probe.get("expect") or []}
+    raw_expect = probe.get("expect") or []
     edited = False
     for name, inp in tool_calls(events):
+        if name == "Bash":
+            # runs made before Bash was disallowed: count files a shell command names
+            cmd = str(inp.get("command") or "").replace("\\ ", " ")
+            if any(e in cmd for e in raw_expect):
+                out["found"] = True
+            if re.search(r"(^|[\s/'\"])world/", cmd):
+                out["map_used"] = True
+            continue
         if name == "Skill" and str(inp.get("skill") or inp.get("command") or "").lstrip("/").split(":")[-1] == "world":
             out["map_used"] = True
         path = inp.get("file_path")
@@ -851,9 +863,14 @@ def score_task_run(probe, rec):
             if under(rel, WORLD_DIR) or under(rel, ROUTER_DIR):
                 out["map_used"] = True
         elif name == "Write":
-            out["created"].append(rel)
+            if norm_path(rel) in expect:
+                out["found"] = True  # writing over the existing file means the agent located it
+            else:
+                out["created"].append(rel)
         elif name == "Edit":
             edited = True
+            if norm_path(rel) in expect:
+                out["found"] = True
     if probe.get("negative"):
         out["correct"] = bool(out["created"]) or edited
     else:

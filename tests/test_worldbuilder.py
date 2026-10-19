@@ -279,6 +279,28 @@ class WorldbuilderTest(unittest.TestCase):
         report = (out / "report.md").read_text()
         self.assertIn("p02: missing knowledge", report)
 
+    def test_task_score_counts_shell_reads_and_edits_of_the_target(self):
+        def run(*calls):
+            lines = [json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": n, "input": i}]}}) for n, i in calls]
+            lines.append(json.dumps({"type": "result", "num_turns": 1}))
+            return {"workdir": "/w", "stdout": "\n".join(lines)}
+        p = {"id": "p01", "kind": "task", "expect": ["docs/My Note.md"]}
+        s = wb.score_task_run(p, run(("Bash", {"command": "cat world/WORLD.md docs/My\\ Note.md"})))
+        self.assertEqual((s["found"], s["map_used"]), (True, True))
+        s = wb.score_task_run(p, run(("Bash", {"command": "ls networld/x"})))
+        self.assertEqual((s["found"], s["map_used"]), (False, False))
+        s = wb.score_task_run(p, run(("Edit", {"file_path": "/w/docs/My Note.md"})))
+        self.assertTrue(s["found"])
+        s = wb.score_task_run(p, run(("Write", {"file_path": "/w/new.md"})))
+        self.assertEqual((s["found"], s["rebuilt"]), (False, True))
+
+    def test_eval_runs_disallow_the_shell(self):
+        class A: max_turns = 5; model = None; user_settings = False
+        for task in (False, True):
+            cmd = wb.claude_cmd(A, task)
+            self.assertEqual(cmd[cmd.index("--disallowedTools") + 1], "Bash")
+
     def test_rel_to_workdir_handles_private_prefix(self):
         self.assertEqual(wb.rel_to_workdir("/private/var/x/run/a.md", "/var/x/run"), "a.md")
         self.assertEqual(wb.rel_to_workdir("/var/x/run/a.md", "/private/var/x/run"), "a.md")
