@@ -24,6 +24,27 @@ print(json.dumps({"result": "I looked around.\\n" + json.dumps(ans), "total_cost
                             "cache_creation_input_tokens": 0}}))
 """
 
+TASK_STUB = """#!/usr/bin/env python3
+import json, os, sys
+q = sys.stdin.read()
+cwd = os.path.realpath(os.getcwd())
+world = "-world-" in os.path.basename(cwd)
+calls = []
+if world:
+    calls += [("Skill", {"skill": "world"}), ("Read", {"file_path": cwd + "/world/WORLD.md"})]
+    if "b thing" in q:
+        calls.append(("Read", {"file_path": cwd + "/notes/b.md"}))
+else:
+    calls.append(("Read", {"file_path": cwd + "/notes/a.md"}))
+    open(os.path.join(cwd, "new.md"), "w").write("rebuilt")
+    calls.append(("Write", {"file_path": cwd + "/new.md", "content": "rebuilt"}))
+calls.append(("Write", {"file_path": "/tmp/elsewhere.md", "content": "x"}))
+for name, inp in calls:
+    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": inp}]}}))
+print(json.dumps({"type": "result", "result": "done", "total_cost_usd": 0.02, "num_turns": len(calls),
+                  "usage": {"input_tokens": 1, "output_tokens": 1}}))
+"""
+
 
 class WorldbuilderTest(unittest.TestCase):
     def setUp(self):
@@ -233,6 +254,36 @@ class WorldbuilderTest(unittest.TestCase):
         self.assertEqual(s["arms"]["world"]["accuracy_pct"], 100.0)
         self.assertEqual(s["arms"]["baseline"]["accuracy_pct"], 0.0)
         self.assertEqual(s["arms"]["world"]["mean_tokens"], 115)
+
+    def test_task_runs_are_isolated_and_scored_from_the_trace(self):
+        self.add_world()
+        out = Path(self.tmp.name) / "eval"
+        self.wb("eval", "prepare", "--out", str(out))
+        stub = Path(self.tmp.name) / "claude-task-stub"
+        stub.write_text(TASK_STUB)
+        stub.chmod(0o755)
+        probes = Path(self.tmp.name) / "probes.json"
+        probes.write_text(json.dumps({"probes": [
+            {"id": "p01", "kind": "task", "task": "Write up the b thing for the team.", "expect": ["notes/b.md"]},
+            {"id": "p02", "kind": "task", "task": "Summarize the lonely note.", "expect": ["lonely/c.md"]}]}))
+        env = {"WORLDBUILDER_CLAUDE": str(stub)}
+        self.wb("eval", "run", "--dir", str(out), "--probes", str(probes), "--jobs", "2", env=env)
+        self.assertFalse((out / "baseline/new.md").exists())
+        self.assertFalse(list((out / "work").iterdir()))
+        rec = json.loads((out / "results/p01-baseline-1.json").read_text())
+        self.assertTrue(rec["workdir"].endswith("p01-baseline-1"))
+        self.wb("eval", "score", "--dir", str(out), "--probes", str(probes))
+        s = json.loads((out / "summary.json").read_text())["kinds"]["task"]
+        self.assertEqual((s["world"]["correct"], s["world"]["map_used"], s["world"]["rebuilt"]), (1, 2, 0))
+        self.assertEqual((s["baseline"]["correct"], s["baseline"]["map_used"], s["baseline"]["rebuilt"]), (0, 0, 2))
+        report = (out / "report.md").read_text()
+        self.assertIn("p02: missing knowledge", report)
+
+    def test_rel_to_workdir_handles_private_prefix(self):
+        self.assertEqual(wb.rel_to_workdir("/private/var/x/run/a.md", "/var/x/run"), "a.md")
+        self.assertEqual(wb.rel_to_workdir("/var/x/run/a.md", "/private/var/x/run"), "a.md")
+        self.assertIsNone(wb.rel_to_workdir("/var/x/other/a.md", "/var/x/run"))
+        self.assertEqual(wb.rel_to_workdir("notes/a.md", "/var/x/run"), "notes/a.md")
 
     def test_score_counts_unparsed_runs_as_errors(self):
         p = {"id": "p01", "expect": ["a.md"]}

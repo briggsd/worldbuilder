@@ -662,15 +662,37 @@ Set "existing" to false when nothing relevant exists. List in "found" only files
 """
 
 
-def claude_cmd(args):
-    cmd = [os.environ.get("WORLDBUILDER_CLAUDE", "claude"), "-p", "--output-format", "json",
-           "--no-session-persistence", "--max-turns", str(args.max_turns),
-           "--allowedTools", "Read,Grep,Glob,Skill"]
+TASK_PROMPT = """{task}
+
+Do the work in this project. When you finish, reply with a short summary of what you did.
+"""
+
+FIND_TOOLS = "Read,Grep,Glob,Skill"
+TASK_TOOLS = "Read,Grep,Glob,Skill,Edit(./**),Write(./**)"
+
+
+def is_task(probe):
+    return probe.get("kind") == "task"
+
+
+def claude_cmd(args, task=False):
+    cmd = [os.environ.get("WORLDBUILDER_CLAUDE", "claude"), "-p", "--no-session-persistence",
+           "--max-turns", str(args.max_turns), "--allowedTools", TASK_TOOLS if task else FIND_TOOLS]
+    cmd += ["--output-format", "stream-json", "--verbose"] if task else ["--output-format", "json"]
     if args.model:
         cmd += ["--model", args.model]
     if not args.user_settings:
         cmd += ["--setting-sources", "project,local"]
     return cmd
+
+
+def clone_tree(src, dst):
+    """Copy-on-write clone where the filesystem supports it (APFS), plain copy otherwise."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["cp", "-cR", str(src), str(dst)], capture_output=True)
+    if r.returncode != 0:
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst, symlinks=True)
 
 
 def cmd_eval_run(args):
@@ -685,19 +707,32 @@ def cmd_eval_run(args):
     jobs = [(p, arm, t) for p in probes for arm in arms for t in range(1, args.trials + 1)
             if not (res / f"{p['id']}-{arm}-{t}.json").exists()]
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
-    base = claude_cmd(args)
     print(f"{len(jobs)} runs to do ({len(probes)} probes x {len(arms)} arms x {args.trials} trials, "
           f"{len(probes) * len(arms) * args.trials - len(jobs)} already done)", flush=True)
 
     def run(job):
         p, arm, t = job
         start = time.time()
+        cwd, rec = d / arm, {}
+        if is_task(p):
+            # build tasks write files, so each run gets its own copy of the arm
+            cwd = d / "work" / f"{p['id']}-{arm}-{t}"
+            shutil.rmtree(cwd, ignore_errors=True)
+            clone_tree(d / arm, cwd)
+            rec["workdir"] = os.path.realpath(cwd)
+            prompt = TASK_PROMPT.format(task=p["task"])
+        else:
+            prompt = PROMPT.format(question=p["question"])
         try:
-            r = subprocess.run(base, input=PROMPT.format(question=p["question"]), cwd=d / arm, env=env,
+            r = subprocess.run(claude_cmd(args, is_task(p)), input=prompt, cwd=cwd, env=env,
                                capture_output=True, text=True, timeout=args.timeout)
-            rec = {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr[-2000:]}
-        except subprocess.TimeoutExpired:
-            rec = {"returncode": None, "stdout": "", "stderr": f"timeout after {args.timeout}s"}
+            rec.update({"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr[-2000:]})
+        except subprocess.TimeoutExpired as ex:
+            out = ex.stdout.decode() if isinstance(ex.stdout, bytes) else (ex.stdout or "")
+            rec.update({"returncode": None, "stdout": out, "stderr": f"timeout after {args.timeout}s"})
+        finally:
+            if is_task(p):
+                shutil.rmtree(cwd, ignore_errors=True)
         rec.update({"probe": p["id"], "arm": arm, "trial": t, "seconds": round(time.time() - start, 1)})
         (res / f"{p['id']}-{arm}-{t}.json").write_text(json.dumps(rec, indent=1))
         print(f"  {p['id']} {arm:<8} trial {t}  rc={rec['returncode']}  {rec['seconds']}s", flush=True)
@@ -756,66 +791,197 @@ def score_run(probe, rec):
     return out
 
 
+def stream_events(stdout):
+    events = []
+    for line in (stdout or "").splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def tool_calls(events):
+    for e in events:
+        if e.get("type") == "assistant":
+            for b in (e.get("message") or {}).get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    yield b.get("name"), b.get("input") or {}
+
+
+def rel_to_workdir(path, workdir):
+    """Project-relative path for a tool's file_path, or None when it points outside the run's copy."""
+    def bare(x):
+        return x[len("/private"):] if x.startswith("/private/") else x
+    path, workdir = bare(str(path)), bare(str(workdir)).rstrip("/")
+    if not os.path.isabs(path):
+        return path
+    if workdir and path.startswith(workdir + "/"):
+        return path[len(workdir) + 1:]
+    return None
+
+
+def score_task_run(probe, rec):
+    """Score a build-task run from its tool trace: did it open the existing work before building?"""
+    out = {"ok": False, "correct": False, "tokens": None, "cost": None, "turns": None, "error": None,
+           "found": False, "map_used": False, "rebuilt": False, "created": []}
+    events = stream_events(rec.get("stdout"))
+    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    if result is None:
+        out["error"] = (rec.get("stderr") or "no result event")[-200:]
+        return out
+    u = result.get("usage") or {}
+    out["tokens"] = sum(u.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",
+                                                  "cache_read_input_tokens", "output_tokens"))
+    out["cost"] = result.get("total_cost_usd")
+    out["turns"] = result.get("num_turns")
+    out["ok"] = True
+    expect = {norm_path(x) for x in probe.get("expect") or []}
+    edited = False
+    for name, inp in tool_calls(events):
+        if name == "Skill" and str(inp.get("skill") or inp.get("command") or "").lstrip("/").split(":")[-1] == "world":
+            out["map_used"] = True
+        path = inp.get("file_path")
+        rel = rel_to_workdir(path, rec.get("workdir", "")) if path else None
+        if rel is None:
+            continue
+        if name == "Read":
+            if norm_path(rel) in expect:
+                out["found"] = True
+            if under(rel, WORLD_DIR) or under(rel, ROUTER_DIR):
+                out["map_used"] = True
+        elif name == "Write":
+            out["created"].append(rel)
+        elif name == "Edit":
+            edited = True
+    if probe.get("negative"):
+        out["correct"] = bool(out["created"]) or edited
+    else:
+        out["correct"] = out["found"]
+        out["rebuilt"] = bool(out["created"]) and not out["found"]
+    return out
+
+
 def mean(xs):
     xs = [x for x in xs if x is not None]
     return sum(xs) / len(xs) if xs else None
+
+
+def fmt(x, kind):
+    if x is None:
+        return "-"
+    return {"cost": "$%.4f" % x, "tokens": str(round(x)), "turns": str(round(x, 1))}[kind]
+
+
+def pct(n, d):
+    return round(100 * n / d, 1) if d else None
 
 
 def cmd_eval_score(args):
     d = Path(args.dir).resolve()
     probes = json.loads(Path(args.probes).read_text())["probes"]
     arms = args.arms.split(",")
-    rows, per_arm = [], {a: [] for a in arms}
     expected = len(probes) * len(arms) * args.trials
-    present = 0
+    present, rows = 0, []
     for p in probes:
         row = {"probe": p, "arms": {}}
         for arm in arms:
-            results = []
+            row["arms"][arm] = []
             for t in range(1, args.trials + 1):
                 f = d / "results" / f"{p['id']}-{arm}-{t}.json"
                 if f.exists():
                     present += 1
-                    s = score_run(p, json.loads(f.read_text()))
-                    results.append(s)
-                    per_arm[arm].append(s)
-            row["arms"][arm] = results
+                    rec = json.loads(f.read_text())
+                    row["arms"][arm].append(score_task_run(p, rec) if is_task(p) else score_run(p, rec))
         rows.append(row)
 
-    lines = ["# worldbuilder eval", "", f"Runs present: {present} of {expected} expected.", ""]
-    lines += ["| arm | runs | parsed | correct | accuracy | mean tokens | mean cost | mean turns |",
-              "|---|---|---|---|---|---|---|---|"]
+    lines = ["# worldbuilder eval", "", f"Runs present: {present} of {expected} expected."]
     summary = {}
-    for arm in arms:
-        rs = per_arm[arm]
-        ok = [r for r in rs if r["ok"]]
-        correct = sum(1 for r in ok if r["correct"])
-        acc = round(100 * correct / len(rs), 1) if rs else None
-        tok, cost, turns = mean([r["tokens"] for r in rs]), mean([r["cost"] for r in rs]), mean([r["turns"] for r in rs])
-        summary[arm] = {"runs": len(rs), "parsed": len(ok), "correct": correct, "accuracy_pct": acc,
-                        "mean_tokens": tok, "mean_cost": cost, "mean_turns": turns}
-        lines.append(f"| {arm} | {len(rs)} | {len(ok)} | {correct} | {acc}% | "
-                     f"{round(tok) if tok else '-'} | {('$%.4f' % cost) if cost else '-'} | "
-                     f"{round(turns, 1) if turns else '-'} |")
-    lines += ["", "| probe | kind | question | " + " | ".join(arms) + " |", "|---|---|---|" + "---|" * len(arms)]
-    for row in rows:
-        p = row["probe"]
-        cells = []
+    for kind in ("find", "task"):
+        krows = [r for r in rows if is_task(r["probe"]) == (kind == "task")]
+        if not krows:
+            continue
+        if kind == "find":
+            lines += ["", "## Find probes", "", "The agent is asked whether something exists. Correct when it cites an expected file.", "",
+                      "| arm | runs | parsed | correct | accuracy | mean tokens | mean cost | mean turns |",
+                      "|---|---|---|---|---|---|---|---|"]
+        else:
+            lines += ["", "## Build tasks", "",
+                      "The agent is given work to do and never told to look. Found: it opened an expected file. "
+                      "Rebuilt: it created files without opening the existing work. Map used: it opened world/ or the world skill.", "",
+                      "| arm | runs | parsed | found | found % | rebuilt | map used | mean tokens | mean cost | mean turns |",
+                      "|---|---|---|---|---|---|---|---|---|---|"]
         for arm in arms:
-            rs = row["arms"][arm]
-            cells.append(" ".join("✓" if r["correct"] else ("✗" if r["ok"] else "err") for r in rs) or "-")
-        q = p["question"].replace("|", "/")
-        q = q if len(q) <= 90 else q[:87] + "..."
-        lines.append(f"| {p['id']} | {'negative' if p.get('negative') else 'exists'} | {q} | " + " | ".join(cells) + " |")
-    errors = [(row["probe"]["id"], arm, r["error"]) for row in rows for arm in arms for r in row["arms"][arm] if r["error"]]
+            rs = [x for r in krows for x in r["arms"][arm]]
+            ok = [x for x in rs if x["ok"]]
+            correct = sum(1 for x in ok if x["correct"])
+            tok, cost, turns = (mean([x[k] for x in rs]) for k in ("tokens", "cost", "turns"))
+            s = {"runs": len(rs), "parsed": len(ok), "correct": correct, "accuracy_pct": pct(correct, len(rs)),
+                 "mean_tokens": tok, "mean_cost": cost, "mean_turns": turns}
+            tail = f"{fmt(tok, 'tokens')} | {fmt(cost, 'cost')} | {fmt(turns, 'turns')} |"
+            if kind == "find":
+                lines.append(f"| {arm} | {len(rs)} | {len(ok)} | {correct} | {s['accuracy_pct']}% | {tail}")
+            else:
+                s["rebuilt"] = sum(1 for x in ok if x["rebuilt"])
+                s["map_used"] = sum(1 for x in ok if x["map_used"])
+                lines.append(f"| {arm} | {len(rs)} | {len(ok)} | {correct} | {s['accuracy_pct']}% | "
+                             f"{s['rebuilt']} | {s['map_used']} | {tail}")
+            summary.setdefault(kind, {})[arm] = s
+        lines += ["", "| probe | kind | request | " + " | ".join(arms) + " |", "|---|---|---|" + "---|" * len(arms)]
+        for row in krows:
+            p = row["probe"]
+            cells = []
+            for arm in arms:
+                marks = []
+                for x in row["arms"][arm]:
+                    m = "✓" if x["correct"] else ("✗" if x["ok"] else "err")
+                    if kind == "task" and x.get("map_used"):
+                        m += " map"
+                    if x.get("rebuilt"):
+                        m += " rebuilt"
+                    marks.append(m)
+                cells.append(", ".join(marks) or "-")
+            q = (p.get("task") or p.get("question") or "").replace("|", "/").replace("\n", " ")
+            q = q if len(q) <= 90 else q[:87] + "..."
+            lines.append(f"| {p['id']} | {'negative' if p.get('negative') else kind} | {q} | " + " | ".join(cells) + " |")
+
+    misses = diagnose_task_misses(d, rows)
+    if misses:
+        lines += ["", "## World-arm misses on build tasks", ""] + misses
+    errors = [(row["probe"]["id"], arm, x["error"]) for row in rows for arm in arms for x in row["arms"][arm] if x["error"]]
     if errors:
         lines += ["", "## Errors", ""] + [f"- {pid} {arm}: {e}" for pid, arm, e in errors]
     report = "\n".join(lines) + "\n"
     (d / "report.md").write_text(report)
-    (d / "summary.json").write_text(json.dumps({"expected": expected, "present": present, "arms": summary}, indent=1))
+    flat = summary.get("find") if set(summary) == {"find"} else None
+    (d / "summary.json").write_text(json.dumps({"expected": expected, "present": present,
+                                                "arms": flat or summary.get("task") or {}, "kinds": summary}, indent=1))
     print(report)
     if present < expected:
         print(f"WARNING: {expected - present} runs missing. Re-run `worldbuilder eval run` to finish them.")
+
+
+def diagnose_task_misses(d, rows):
+    """First-pass diagnosis of each world-arm build-task miss, from the trace and the maps."""
+    maps = "\n".join(read_text(d / "world", f) for f in
+                     (str(x.relative_to(d / "world")) for x in (d / "world" / WORLD_DIR).glob("*.md")))
+    out = []
+    for row in rows:
+        p = row["probe"]
+        if not is_task(p) or p.get("negative"):
+            continue
+        for x in row["arms"].get("world", []):
+            if not x["ok"] or x["correct"]:
+                continue
+            on_map = any(e.rsplit(".", 1)[0] in maps for e in p.get("expect") or [])
+            if not on_map:
+                why = "missing knowledge: no map names the expected file"
+            elif not x["map_used"]:
+                why = "broken road: the agent never opened the map"
+            else:
+                why = "weak entry: the agent read the map and still missed the file"
+            out.append(f"- {p['id']}: {why}")
+    return out
 
 
 # ---------------------------------------------------------------- main

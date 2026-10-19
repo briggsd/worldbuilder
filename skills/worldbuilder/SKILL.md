@@ -62,7 +62,7 @@ Fix anything inside `world/`. Summarize the rest for the user in a short list, l
 
 ## Step 6: Eval
 
-Follow [references/eval.md](references/eval.md). Report the per-arm table, then each world-arm miss diagnosed as missing knowledge, broken road, weak entry, or bad probe, with the fix for each.
+Follow [references/eval.md](references/eval.md). The probes are build tasks, and the score is whether agents opened the existing work before building. Report the per-arm table (found, rebuilt, map used, cost), then each world-arm miss diagnosed as missing knowledge, broken road, weak entry, or bad probe, with the fix for each.
 
 ## Finish
 

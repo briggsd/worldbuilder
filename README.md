@@ -38,12 +38,14 @@ The CLI is on the agent's PATH while the plugin is loaded:
 | `worldbuilder check` | Follows links from the trailheads. Reports reach, hop depth, unreachable directories, dead links and heading anchors, orphans, stale maps, uncovered files, and broken roads in the world itself. `--strict` exits 1 on world problems |
 | `worldbuilder eval sample` | Picks random existing targets across areas, from the survey rather than the maps |
 | `worldbuilder eval prepare` | Copies the project outside itself into a `world` arm and a `baseline` arm without the world |
-| `worldbuilder eval run` | Runs each probe in both arms with headless `claude -p`. Resumable |
+| `worldbuilder eval run` | Runs each probe in both arms with headless `claude -p`, build tasks in per-run clones. Resumable |
 | `worldbuilder eval score` | Scores runs, writes `report.md` and `summary.json` |
 
 ## The eval
 
-Probes are task-shaped questions a teammate would ask without knowing the answer exists ("how do I…", "we need…"), written so a plain search for their words doesn't hit the target. Each probe runs in both arms with the same prompt. A run is correct when its final JSON cites an expected file, or, for negative probes, says nothing exists. The report gives accuracy, tokens, cost, and turns per arm, and counts unparsed runs as errors rather than misses.
+The eval reproduces the failure the world prevents: an agent handed work never thinks to look, and rebuilds what exists. Each probe is a build task ("draft…", "set up…", "write a script that…") whose right starting point already exists in the project. Nobody tells the agent to look. Each task runs in a copy with the world and a copy without it, each run in its own copy-on-write clone so writes never leak between runs. The score comes from the tool trace: did the agent open the existing work (found), did it create files without opening it (rebuilt), and did it use the map. The report also gives a first-pass diagnosis of each world-arm miss.
+
+The older find probes (`"kind": "find"`) ask whether something exists. Asking primes every agent to search, so they mostly measure grep.
 
 Runs use `--setting-sources project,local` by default so your user plugins and settings don't add noise. Pass `--user-settings` to include them.
 
