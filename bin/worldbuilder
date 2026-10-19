@@ -77,6 +77,10 @@ def list_files(root, patterns):
         out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=root,
                              capture_output=True, check=True).stdout.decode("utf-8", "replace")
         files = [f for f in out.split("\0") if f]
+        for w in (WORLD_DIR, ROUTER_DIR):  # list the world even where .gitignore hides it
+            for d, _, names in os.walk(root / w):
+                rel = os.path.relpath(d, root)
+                files += [rel + "/" + n for n in names]
     except (subprocess.CalledProcessError, FileNotFoundError):
         files = []
         for d, dirs, names in os.walk(root):
@@ -84,7 +88,7 @@ def list_files(root, patterns):
             rel = "" if rel == "." else rel + "/"
             dirs[:] = [x for x in dirs if not excluded(rel + x + "/", patterns)]
             files += [rel + n for n in names]
-    return sorted(f for f in files if not excluded(f, patterns) and (root / f).is_file())
+    return sorted({f for f in files if not excluded(f, patterns) and (root / f).is_file()})
 
 
 def is_git(root):

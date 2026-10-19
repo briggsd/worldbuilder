@@ -208,6 +208,16 @@ class WorldbuilderTest(unittest.TestCase):
         self.assertNotIn("worldbuilder", base)
         self.assertIn("keep me", base)
 
+    def test_prepare_keeps_gitignored_router(self):
+        self.add_world()
+        self.write(".gitignore", ".claude/\n")
+        self.write(".claude/skills/world/SKILL.md", "---\nname: world\ndescription: map\n---\n")
+        self.write(".claude/settings.local.json", "{}\n")
+        out = Path(self.tmp.name) / "eval"
+        self.wb("eval", "prepare", "--out", str(out))
+        self.assertTrue((out / "world/.claude/skills/world/SKILL.md").exists())
+        self.assertFalse((out / "world/.claude/settings.local.json").exists())
+
     def test_prepare_rejects_out_inside_project(self):
         self.add_world()
         r = self.wb("eval", "prepare", "--out", str(self.root / "x"), check=False)
