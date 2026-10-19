@@ -4,18 +4,62 @@ A Claude Code plugin that builds a **world** for a project: a wide, shallow map 
 
 It implements the world-building model from OpenRig's [How My AI Civilization Actually Works](https://www.youtube.com/watch?v=CYRJDTcTKhQ). Agents fail at onboarding before they search, because they don't know what to search for. The fix is a map that names everything at shallow depth (width for depth), with a traceable route from boot to every piece of knowledge (route-to-leaf reachability).
 
-## What it builds
+## What it builds: the levels of a world
 
-In the target project:
+A world has five levels. Each one is wider and shallower than the files it points to, and each level links down to the next, so an agent can walk from boot to any file in the project in a few hops.
 
-| Path | What it is |
-|---|---|
-| `world/WORLD.md` | One page naming every area, its landmarks, the highways between areas, and the edges of the map |
-| `world/<area>.md` | One map per area. Every entry links to a real file or heading and says when you'd need it |
-| `.claude/skills/world/SKILL.md` | A router skill whose description keeps the map discoverable mid-session and after compaction |
-| A marked block in `CLAUDE.md` or `AGENTS.md` | The trailhead pointer. Applied only after you approve it |
+| Level | Path | Size | Job |
+|---|---|---|---|
+| 1. Trailhead | Marked block in `CLAUDE.md` or `AGENTS.md` | 4 lines | Tells every new session the map exists. Applied only after you approve it |
+| 2. Router skill | `.claude/skills/world/SKILL.md` | Description under 60 words | Keeps the map findable mid-session and after compaction, when the trailhead has scrolled out of context |
+| 3. World page | `world/WORLD.md` | At most 120 lines | The whole project on one page: every area, its landmarks, the highways between areas, and the edges |
+| 4. Area maps | `world/<area>.md` | At most 100 lines each | Every entity in one area, one line each, linked to its file or heading |
+| 5. Territory | The project's own files | Unchanged | Where the detail lives. The world never copies it |
 
-Everything is plain markdown, readable in an editor, GitHub, or Obsidian.
+### 1. Trailhead
+
+The entry point. Claude Code loads `CLAUDE.md` at the start of every session, and many other agents load `AGENTS.md`, so a short block there is the one pointer every agent sees. It names `world/WORLD.md` and the `world` skill, and says to read the map before creating anything. The `<!-- worldbuilder:start -->` and `<!-- worldbuilder:end -->` markers let a rebuild replace the block and let the eval strip it for the baseline.
+
+### 2. Router skill
+
+A skill named `world` whose description starts "Map of <project>" and names the areas in the words people use. Skill descriptions stay in context for the whole session, so the agent can still reach the map after the trailhead has been compacted away. The skill body is three steps: read WORLD.md, open the area map, and search the project when the map has nothing.
+
+### 3. World page
+
+`WORLD.md` is the top of the map. It has four parts:
+
+- **How to use this map**: three rules for the agent reading it.
+- **Areas**: a table with one row per area map, a one-line description, and 2 to 4 landmark links, so an agent can jump straight to the most important files.
+- **Highways**: 3 to 8 routes that cross areas, such as a workflow, a data flow, or a pipeline. Each one names its start and its end. In a code repo, "add a resource type" runs from the model through the service and the API to the UI.
+- **Edges**: what the map leaves out on purpose (generated output, archives, vendored code, migrations) and how to search it.
+
+### 4. Area maps
+
+One map per area agreed during the survey. Each map has the same sections:
+
+- **Landmarks**: the 3 to 7 things an agent most needs to know exist here. Each one has a "Use when" line phrased as the task someone would ask for. That line is what stops an agent rebuilding the entity.
+- **Everything else**: one line per remaining entity, grouped under subheadings when there are more than 15.
+- **Routes out**: links to other area maps, and why a task here leads there.
+- **Edges**: files the area covers but doesn't list one by one, and how to find things in them.
+
+The frontmatter's `covers` lists the paths the map is responsible for. `worldbuilder check` uses it to flag a stale map and to count files no map covers.
+
+### 5. Territory
+
+The project's own files. An entry says only what exists, where, and when you'd need it. How a thing works stays in its file. This is **width for depth**: the map names everything and explains little, so it stays small enough to read in full and cheap to keep current.
+
+### Walking the levels
+
+An agent asked to "add a debug level to app log entries" in a large repo:
+
+1. reads the trailhead in `AGENTS.md`,
+2. opens `world/WORLD.md` and picks the shared-types area from the table,
+3. opens `world/shared-types.md` and finds the log-type entry,
+4. opens the enum file the entry links to and extends it instead of writing a new one.
+
+`worldbuilder check` measures this walk: how much of the project is reachable by links from the trailheads, and in how many hops.
+
+Everything is plain markdown, readable in an editor, GitHub, or Obsidian. The exact templates are in [skills/worldbuilder/references/world-format.md](skills/worldbuilder/references/world-format.md).
 
 ## Install
 
