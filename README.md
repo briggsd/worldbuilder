@@ -4,11 +4,22 @@ A Claude Code plugin that builds a **world** for a project: a wide, shallow map 
 
 It implements the world-building model from OpenRig's [How My AI Civilization Actually Works](https://www.youtube.com/watch?v=CYRJDTcTKhQ). Agents fail at onboarding before they search, because they don't know what to search for. The fix is a map that names everything at shallow depth (width for depth), with a traceable route from boot to every piece of knowledge (route-to-leaf reachability).
 
-## What it builds: the levels of a world
+## The model, and what v1 builds
 
-A world has five levels. Each one is wider and shallower than the files it points to, and each level links down to the next, so an agent can walk from boot to any file in the project in a few hops.
+The OpenRig model arranges a project's knowledge along four dimensions. worldbuilder v1 builds the first two.
 
-| Level | Path | Size | Job |
+| Dimension | Question it answers | In v1 |
+|---|---|---|
+| Map (ontology) | What exists, and where? | Built: WORLD.md and the area maps |
+| Navigation (topology) | How does an agent get from boot to it? | Built: trailhead, router skill, links, and `worldbuilder check` |
+| Elevation (epistemology) | How established is it? Canon, insight, field note, observation, raw data | Not built, planned for v2. See [Elevation](#elevation-the-levels-of-knowledge) |
+| Time and lore | What happened, and what did we learn from it? | Not built, planned for v2. See [Lore](#lore) |
+
+## What it builds: the layers of the map
+
+The map has five layers. Each one is wider and shallower than the files it points to, and each links down to the next, so an agent can walk from boot to any file in the project in a few hops.
+
+| Layer | Path | Size | Job |
 |---|---|---|---|
 | 1. Trailhead | Marked block in `CLAUDE.md` or `AGENTS.md` | 4 lines | Tells every new session the map exists. Applied only after you approve it |
 | 2. Router skill | `.claude/skills/world/SKILL.md` | Description under 60 words | Keeps the map findable mid-session and after compaction, when the trailhead has scrolled out of context |
@@ -48,7 +59,7 @@ The frontmatter's `covers` lists the paths the map is responsible for. `worldbui
 
 The project's own files. An entry says only what exists, where, and when you'd need it. How a thing works stays in its file. This is **width for depth**: the map names everything and explains little, so it stays small enough to read in full and cheap to keep current.
 
-### Walking the levels
+### Walking the layers
 
 An agent asked to "add a debug level to app log entries" in a large repo:
 
@@ -60,6 +71,31 @@ An agent asked to "add a debug level to app log entries" in a large repo:
 `worldbuilder check` measures this walk: how much of the project is reachable by links from the trailheads, and in how many hops.
 
 Everything is plain markdown, readable in an editor, GitHub, or Obsidian. The exact templates are in [skills/worldbuilder/references/world-format.md](skills/worldbuilder/references/world-format.md).
+
+## Elevation: the levels of knowledge
+
+The map tells an agent what exists. Elevation tells it how far to trust it. Knowledge matures upward through five levels:
+
+| Level | What it is | Examples |
+|---|---|---|
+| Canon | What the project treats as established. Agents follow it without re-deriving it | A rule in `AGENTS.md` ("generate Postgres migrations, never hand-write them"), an accepted decision record, a settled convention |
+| Insight | A lesson worth sharing with the whole team, drawn from several notes | A concept in a topic doc, a pattern named in a design doc |
+| Field note | A written-up finding from one piece of work | A capture note, a postmortem, a PR description |
+| Observation | One thing seen once, not yet confirmed | A line in a session log, a review comment, a "this looks stale" flag |
+| Raw data | Material nobody has distilled | Logs, transcripts, and the markdown exhaust agents generate |
+
+Two rules govern the ladder:
+
+- **Canon measures how established something is, not how old it is.** A new discovery can become canon at once, while an old pattern can stay a field note because it only applies sometimes.
+- **Higher levels rest on lower ones.** A piece of canon should link down to the insights and observations that justify it, so an agent can check why a rule exists before it bends it.
+
+Without elevation every map entry looks equally trustworthy. An agent can't tell a stale design note from a rule it must follow. v1 has this gap. The v2 plan is to tag each entry with its level, link canon down to its evidence, and have `worldbuilder check` flag canon that has no support.
+
+## Lore
+
+Lore is the fourth dimension: named stories of real failures, passed from one generation of agents to the next. One good story carries a lesson into situations no rule anticipated, and its name works as a shorthand. The OpenRig example is the "doghouse moonbase": an agent asked for a doghouse made one reasonable decision after another and built a moonbase. Saying "moonbase" brings the whole lesson back without retelling it.
+
+v1 builds no lore. The v2 plan is a `world/lore/` folder of short, addressable stories, each linked from the area maps where the failure happens and taught again after compaction.
 
 ## Install
 
