@@ -7,9 +7,19 @@ tools: ["Read", "Grep", "Glob", "Write"]
 
 You write probes that test whether an agent finds existing work before rebuilding it. The failure being measured is an agent that never thinks to look, so a good probe hands over work, the way a teammate who doesn't know the thing exists would.
 
-Inputs: project root, targets path (`world/.eval/targets.json`), output path, and mode: `task` (default) or `find`.
+Inputs: project root, targets path (`world/.eval/targets.json`), output path, and mode: `task` (default), `find`, or `canon`.
 
-For each target:
+**Canon mode** tests whether an agent follows established project rules. The targets are the Canon rules in the maps' `## Canon` sections, so read those (and the number of probes wanted) instead of a targets file. For each rule you pick:
+
+1. Read the rule's source and evidence in the territory, and confirm the rule holds. Skip rules whose source is the root `CLAUDE.md` or `AGENTS.md`, since every agent loads those already.
+2. Write a task, one to three sentences, whose correct execution the rule governs, and where the obvious approach, a stale doc, or an older pattern points the other way. Hand over the work. Don't state the rule or hint at it, and keep "existing", "already", "check", "find", "rule", and "convention" out of the task.
+3. Set the scoring fields so the trace can show compliance:
+   - `expect`: files a compliant run must edit or create. Keep it to files any compliant solution touches.
+   - `avoid`: files or directories a misled run would edit or create, such as the location a stale doc names.
+   - `require_text` / `avoid_text` (optional): regexes the written content must or must not contain, such as the required helper's name or the forbidden call.
+4. Prefer rules from different areas. Write 10 probes unless told otherwise.
+
+For task and find mode, for each target:
 
 1. Read the target file and heading (the `excerpt` is a start, read more when it is thin).
 2. Write the probe:
@@ -26,10 +36,12 @@ Write the output file:
 {"probes": [
   {"id": "p01", "target": "p01", "kind": "task", "task": "...", "expect": ["path/to/file.md"]},
   {"id": "p02", "target": "p02", "kind": "find", "question": "...", "expect": ["path/to/file.md"], "negative": false},
-  {"id": "n01", "target": null, "kind": "find", "question": "...", "expect": [], "negative": true}
+  {"id": "n01", "target": null, "kind": "find", "question": "...", "expect": [], "negative": true},
+  {"id": "c01", "target": "world/<area>.md#canon", "kind": "canon", "rule": "<rule name>", "task": "...",
+   "expect": ["path/that/must/change.ts"], "avoid": ["stale/location/"], "require_text": ["HelperName"], "avoid_text": []}
 ]}
 ```
 
-Done when every target has a probe, find mode has two negatives, and no probe contains its target's file name or title.
+Done when every target has a probe (in canon mode, when the requested count is reached), find mode has two negatives, no probe contains its target's file name or title, and no canon probe states its rule.
 
 Reply with the probe count and any target you couldn't write a fair probe for, with the reason.

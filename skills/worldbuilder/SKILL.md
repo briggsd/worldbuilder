@@ -31,13 +31,13 @@ Done when every file in the survey falls under some area's `covers` or under `ex
 
 ## Step 2: Map each area
 
-Launch one `worldbuilder:world-cartographer` per area, all in one message so they run in parallel. Give each: the project root, area id, title, covers, the survey's `generated` timestamp and `link_style`, the full list of area ids and titles (for routes out), and the output path `world/<area-id>.md`. For a refresh, also give the existing map path so it updates rather than starting over.
+Launch one `worldbuilder:world-cartographer` per area, all in one message so they run in parallel. Give each: the project root, area id, title, covers, the survey's `generated` timestamp and `link_style`, the full list of area ids and titles (for routes out), and the output path `world/<area-id>.md`. For a refresh, also give the existing map path so it updates rather than starting over. To add elevation to a world built before it existed, pass `mode: elevate` with the existing map.
 
-Done when every area has a map and `worldbuilder check` lists no broken roads in `world/`.
+Done when every area has a map, every prose entry has a level tag, and `worldbuilder check` lists no broken roads and no canon without evidence in `world/`.
 
 ## Step 3: Write WORLD.md
 
-Read every area map's intro and Landmarks. Write `world/WORLD.md`: one row per area, the highways that cross areas, and the edges. It names everything and explains nothing. Stay under 120 lines.
+Read every area map's intro, Landmarks, and Canon. Write `world/WORLD.md`: the project-wide canon (rules that hold in more than one area), one row per area, the highways that cross areas, and the edges. It names everything and explains nothing. Stay under 140 lines.
 
 Done when `worldbuilder check` shows no world issues and every area map is linked from WORLD.md.
 
@@ -62,7 +62,7 @@ Fix anything inside `world/`. Summarize the rest for the user in a short list, l
 
 ## Step 6: Eval
 
-Follow [references/eval.md](references/eval.md). The probes are build tasks, and the score is whether agents opened the existing work before building. Report the per-arm table (found, rebuilt, map used, cost), then each world-arm miss diagnosed as missing knowledge, broken road, weak entry, or bad probe, with the fix for each.
+Follow [references/eval.md](references/eval.md). Build-task probes score whether agents opened the existing work before building. Canon probes score whether agents followed the project's established rules where a stale doc or older pattern points another way. Report the per-arm tables (found, rebuilt, map used, cost, and for canon followed and misled), then each world-arm miss diagnosed as missing knowledge, broken road, weak entry, or bad probe, with the fix for each.
 
 ## Finish
 

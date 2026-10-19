@@ -490,11 +490,37 @@ def cmd_check(args):
         sys.exit(1)
 
 
+LEVELS = ("canon", "insight", "note", "observation", "data")
+LEVEL_TAG = re.compile(r"(?<!\[)\[(" + "|".join(LEVELS) + r")\](?![(\[])")
+CANON_HEADING = re.compile(r"^##\s+Canon\s*$")
+EVIDENCE = re.compile(r"Evidence:\s*.*(\[\[[^\]]+\]\]|\[[^\]]*\]\([^)]+\))")
+
+
+def elevation(text):
+    """Level tag counts and Canon-section rules of one map, with the rules that cite no evidence."""
+    levels = {k: 0 for k in LEVELS}
+    rules, unsupported, in_canon = 0, [], False
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.startswith("## "):
+            in_canon = bool(CANON_HEADING.match(line))
+            continue
+        if in_canon and line.lstrip().startswith("- "):
+            rules += 1
+            if not EVIDENCE.search(line):
+                unsupported.append(n)
+        for m in LEVEL_TAG.finditer(INLINE_CODE.sub("", line)):
+            levels[m.group(1)] += 1
+    return {"levels": levels, "canon_rules": rules, "unsupported": unsupported}
+
+
 def check_world(root, files, parsed, edges, territory):
     issues, maps = [], []
     world_md = f"{WORLD_DIR}/WORLD.md"
     if world_md not in files:
         issues.append("world/WORLD.md is missing")
+    else:
+        el = elevation(read_text(root, world_md))
+        issues += [f"{world_md}:{n}: canon rule cites no evidence" for n in el["unsupported"]]
     area_maps = [f for f in files if f.count("/") == 1 and under(f, WORLD_DIR) and f.lower().endswith(".md")
                  and f != world_md and not f.rsplit("/", 1)[-1].startswith((".", "_"))]
     linked_from_world = {e["target"] for e in edges if e["src"] == world_md and e["kind"] == "file"}
@@ -515,9 +541,12 @@ def check_world(root, files, parsed, edges, territory):
         if built:
             stale = [f for f in in_scope if (root / f).stat().st_mtime > built + 1]
         entries = sum(1 for e in edges if e["src"] == m and e["kind"] in ("file", "dir"))
+        text = read_text(root, m)
+        el = elevation(text)
+        issues += [f"{m}:{n}: canon rule cites no evidence" for n in el["unsupported"]]
         maps.append({"map": m, "covers": covers, "built": fm.get("built"), "files": len(in_scope),
                      "changed_since_built": len(stale), "changed": stale[:20], "links": entries,
-                     "lines": len(read_text(root, m).splitlines())})
+                     "lines": len(text.splitlines()), "levels": el["levels"], "canon_rules": el["canon_rules"]})
     for e in edges:
         if (e["kind"] == "file" and under(e["target"], WORLD_DIR) and e["target"] != world_md
                 and not under(e["src"], WORLD_DIR) and not under(e["src"], ROUTER_DIR)):
@@ -552,7 +581,10 @@ def print_check(r):
           f"{w['uncovered_count']} files outside every map's covers")
     for m in w["maps"]:
         flag = f"  STALE ({m['changed_since_built']} changed)" if m["changed_since_built"] else ""
-        print(f"  {m['map']:<40} {m['files']:>4} files  {m['links']:>3} links  {m['lines']:>4} lines{flag}")
+        print(f"  {m['map']:<40} {m['files']:>4} files  {m['links']:>3} links  {m['lines']:>4} lines  "
+              f"{m['canon_rules']:>2} canon rules{flag}")
+    tags = {k: sum(m["levels"][k] for m in w["maps"]) for k in LEVELS}
+    print("  elevation tags: " + "  ".join(f"{k} {v}" for k, v in tags.items()))
     for i in w["issues"]:
         print(f"  issue: {i}")
     for e in w["dead_links"][:20]:
@@ -676,7 +708,8 @@ TASK_TOOLS = "Read,Grep,Glob,Skill,Edit(./**),Write(./**)"
 
 
 def is_task(probe):
-    return probe.get("kind") == "task"
+    """Task and canon probes both hand the agent work to do in its own clone."""
+    return probe.get("kind") in ("task", "canon")
 
 
 def claude_cmd(args, task=False):
@@ -845,7 +878,8 @@ def score_task_run(probe, rec):
     out["ok"] = True
     expect = {norm_path(x) for x in probe.get("expect") or []}
     raw_expect = probe.get("expect") or []
-    edited = False
+    avoid = [norm_path(x) for x in probe.get("avoid") or []]
+    edited, touched, written = False, set(), []
     for name, inp in tool_calls(events):
         if name == "Bash":
             # runs made before Bash was disallowed: count files a shell command names
@@ -867,15 +901,27 @@ def score_task_run(probe, rec):
             if under(rel, WORLD_DIR) or under(rel, ROUTER_DIR):
                 out["map_used"] = True
         elif name == "Write":
+            touched.add(norm_path(rel))
+            written.append(str(inp.get("content") or ""))
             if norm_path(rel) in expect:
                 out["found"] = True  # writing over the existing file means the agent located it
             else:
                 out["created"].append(rel)
         elif name == "Edit":
             edited = True
+            touched.add(norm_path(rel))
+            written.append(str(inp.get("new_string") or ""))
             if norm_path(rel) in expect:
                 out["found"] = True
-    if probe.get("negative"):
+    if probe.get("kind") == "canon":
+        # the rule is followed when the work lands where the rule says and says what it requires
+        text = "\n".join(written)
+        out["followed"] = (all(t in touched for t in expect)
+                           and all(re.search(r, text) for r in probe.get("require_text") or []))
+        out["misled"] = (any(t == a or under(t, a) for t in touched for a in avoid)
+                         or any(re.search(r, text) for r in probe.get("avoid_text") or []))
+        out["correct"] = out["followed"] and not out["misled"]
+    elif probe.get("negative"):
         out["correct"] = bool(out["created"]) or edited
     else:
         out["correct"] = out["found"]
@@ -918,14 +964,21 @@ def cmd_eval_score(args):
 
     lines = ["# worldbuilder eval", "", f"Runs present: {present} of {expected} expected."]
     summary = {}
-    for kind in ("find", "task"):
-        krows = [r for r in rows if is_task(r["probe"]) == (kind == "task")]
+    for kind in ("find", "task", "canon"):
+        krows = [r for r in rows if (r["probe"].get("kind") or "find") == kind]
         if not krows:
             continue
         if kind == "find":
             lines += ["", "## Find probes", "", "The agent is asked whether something exists. Correct when it cites an expected file.", "",
                       "| arm | runs | parsed | correct | accuracy | mean tokens | mean cost | mean turns |",
                       "|---|---|---|---|---|---|---|---|"]
+        elif kind == "canon":
+            lines += ["", "## Canon probes", "",
+                      "The agent is given work that an established project rule governs, where a stale doc or older pattern "
+                      "points another way. Followed: it touched every file the rule requires and wrote what the rule requires. "
+                      "Misled: it touched a path the rule rules out or wrote what it forbids. Correct: followed and not misled.", "",
+                      "| arm | runs | parsed | correct | correct % | followed | misled | map used | mean tokens | mean cost | mean turns |",
+                      "|---|---|---|---|---|---|---|---|---|---|---|"]
         else:
             lines += ["", "## Build tasks", "",
                       "The agent is given work to do and never told to look. Found: it opened an expected file. "
@@ -942,6 +995,12 @@ def cmd_eval_score(args):
             tail = f"{fmt(tok, 'tokens')} | {fmt(cost, 'cost')} | {fmt(turns, 'turns')} |"
             if kind == "find":
                 lines.append(f"| {arm} | {len(rs)} | {len(ok)} | {correct} | {s['accuracy_pct']}% | {tail}")
+            elif kind == "canon":
+                s["followed"] = sum(1 for x in ok if x["followed"])
+                s["misled"] = sum(1 for x in ok if x["misled"])
+                s["map_used"] = sum(1 for x in ok if x["map_used"])
+                lines.append(f"| {arm} | {len(rs)} | {len(ok)} | {correct} | {s['accuracy_pct']}% | "
+                             f"{s['followed']} | {s['misled']} | {s['map_used']} | {tail}")
             else:
                 s["rebuilt"] = sum(1 for x in ok if x["rebuilt"])
                 s["map_used"] = sum(1 for x in ok if x["map_used"])
@@ -956,10 +1015,12 @@ def cmd_eval_score(args):
                 marks = []
                 for x in row["arms"][arm]:
                     m = "✓" if x["correct"] else ("✗" if x["ok"] else "err")
-                    if kind == "task" and x.get("map_used"):
+                    if kind != "find" and x.get("map_used"):
                         m += " map"
-                    if x.get("rebuilt"):
+                    if x.get("rebuilt") and kind == "task":
                         m += " rebuilt"
+                    if x.get("misled"):
+                        m += " misled"
                     marks.append(m)
                 cells.append(", ".join(marks) or "-")
             q = (p.get("task") or p.get("question") or "").replace("|", "/").replace("\n", " ")
@@ -989,7 +1050,7 @@ def diagnose_task_misses(d, rows):
     out = []
     for row in rows:
         p = row["probe"]
-        if not is_task(p) or p.get("negative"):
+        if p.get("kind") != "task" or p.get("negative"):
             continue
         for x in row["arms"].get("world", []):
             if not x["ok"] or x["correct"]:

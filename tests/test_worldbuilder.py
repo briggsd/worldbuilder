@@ -305,6 +305,34 @@ class WorldbuilderTest(unittest.TestCase):
         s = wb.score_task_run(p, run(("Write", {"file_path": "/w/new.md"})))
         self.assertEqual((s["found"], s["rebuilt"]), (False, True))
 
+    def test_canon_score_needs_the_rule_followed_and_the_stale_path_avoided(self):
+        def run(*calls):
+            lines = [json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": n, "input": i}]}}) for n, i in calls]
+            lines.append(json.dumps({"type": "result", "num_turns": 1}))
+            return {"workdir": "/w", "stdout": "\n".join(lines)}
+        p = {"id": "c01", "kind": "canon", "expect": ["db/Index.ts"], "avoid": ["Model/Migrations"],
+             "require_text": [r"AddColumn"], "avoid_text": [r"synchronize:\s*true"]}
+        reg = ("Edit", {"file_path": "/w/db/Index.ts", "new_string": "import AddColumn"})
+        s = wb.score_task_run(p, run(reg))
+        self.assertEqual((s["followed"], s["misled"], s["correct"]), (True, False, True))
+        s = wb.score_task_run(p, run(("Read", {"file_path": "/w/db/Index.ts"})))
+        self.assertEqual((s["followed"], s["correct"]), (False, False))
+        s = wb.score_task_run(p, run(reg, ("Write", {"file_path": "/w/Model/Migrations/1.ts", "content": "x"})))
+        self.assertEqual((s["followed"], s["misled"], s["correct"]), (True, True, False))
+        s = wb.score_task_run(p, run(reg, ("Edit", {"file_path": "/w/db/Config.ts", "new_string": "synchronize: true"})))
+        self.assertEqual((s["misled"], s["correct"]), (True, False))
+
+    def test_check_reports_elevation_and_unsupported_canon(self):
+        self.add_world(map_body="- **B** [note]: b. [[notes/b#Section]]\n- **A** [canon]: a. [[notes/a]]\n\n"
+                                "## Canon\n\n- **Rule one**: do x. Source: [[notes/a]]. Evidence: [[notes/b]]\n"
+                                "- **Rule two**: do y. Source: [[notes/a]].\n\n## Edges\n\n- `[data]` is ignored in code.\n")
+        self.wb("check", "--json")
+        w = json.loads((self.root / "world/.check.json").read_text())["world"]
+        m = w["maps"][0]
+        self.assertEqual((m["canon_rules"], m["levels"]["canon"], m["levels"]["note"], m["levels"]["data"]), (2, 1, 1, 0))
+        self.assertEqual([i for i in w["issues"] if "evidence" in i], ["world/notes.md:14: canon rule cites no evidence"])
+
     def test_eval_runs_disallow_the_shell(self):
         class A: max_turns = 5; model = None; user_settings = False
         for task in (False, True):
