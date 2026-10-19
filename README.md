@@ -21,7 +21,7 @@ The map has five layers. Each one is wider and shallower than the files it point
 
 | Layer | Path | Size | Job |
 |---|---|---|---|
-| 1. Trailhead | Marked block in `CLAUDE.md` or `AGENTS.md` | 4 lines | Tells every new session the map exists. Applied only after you approve it |
+| 1. Trailhead | Marked block in `CLAUDE.md` or `AGENTS.md` | Under 15 lines | Tells every new session the map exists and carries the project-wide canon. Applied only after you approve it |
 | 2. Router skill | `.claude/skills/world/SKILL.md` | Description under 60 words | Keeps the map findable mid-session and after compaction, when the trailhead has scrolled out of context |
 | 3. World page | `world/WORLD.md` | At most 140 lines | The whole project on one page: project-wide canon, every area, its landmarks, the highways between areas, and the edges |
 | 4. Area maps | `world/<area>.md` | At most 120 lines each | Every entity in one area, one line each, linked to its file or heading |
@@ -29,7 +29,7 @@ The map has five layers. Each one is wider and shallower than the files it point
 
 ### 1. Trailhead
 
-The entry point. Claude Code loads `CLAUDE.md` at the start of every session, and many other agents load `AGENTS.md`, so a short block there is the one pointer every agent sees. It names `world/WORLD.md` and the `world` skill, and says to read the map before creating anything. The `<!-- worldbuilder:start -->` and `<!-- worldbuilder:end -->` markers let a rebuild replace the block and let the eval strip it for the baseline.
+The entry point. Claude Code loads `CLAUDE.md` at the start of every session, and many other agents load `AGENTS.md`, so a short block there is the one pointer every agent sees. It names `world/WORLD.md` and the `world` skill, says to open the area map and follow its Canon before changing anything, and lists the project-wide canon rules. The rules sit in the block because on a large project agents read the trailhead and often skip the map. In the oneuptime eval, canon in the block lifted correct runs from 22/30 to 27/30, while rules only in area maps made no difference. worldbuilder never edits the trailhead outside its block. Lines there that the code contradicts are listed for you to fix, because agents follow the trailhead over any map. The `<!-- worldbuilder:start -->` and `<!-- worldbuilder:end -->` markers let a rebuild replace the block and let the eval strip it for the baseline.
 
 ### 2. Router skill
 
@@ -95,6 +95,7 @@ Without elevation every map entry looks equally trustworthy, and an agent can't 
 
 - **Level tags.** Every map entry that points at prose carries a tag after its name: `- **Migration guide** [observation]: ...`. Code and config entries carry none. A doc the code contradicts is tagged `[observation]` and names what supersedes it.
 - **Canon sections.** Each area map and WORLD.md has a `## Canon` section. Each rule is one instruction with a `Source:` link to where it is stated and an `Evidence:` link to the code, tests, CI, or examples that enforce it. Rules are chosen for the traps they prevent: the cases where a stale doc or the obvious approach points the other way.
+- **Trailhead.** The project-wide canon is copied into the trailhead block as one-line instructions, and stale trailhead lines outside the block are reported as conflicts.
 - **Checks.** `worldbuilder check` counts tags per level and flags any canon rule that cites no evidence.
 
 Cartographers assign levels by evidence, not tone. A rule is canon when a rules file states it, code or CI enforces it, or every example follows it. To add elevation to a world built before it existed, run the cartographers in `mode: elevate`.

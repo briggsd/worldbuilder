@@ -138,13 +138,25 @@ The description is the pointer that has to win mid-session, after compaction, wh
 
 Patch the root `CLAUDE.md` if it exists, otherwise the root `AGENTS.md`, otherwise create `CLAUDE.md`. Put the block near the top, after the title. The markers let the eval build a baseline without it and let a rebuild replace it.
 
+The block carries the project-wide canon itself, because the trailhead is the one file every agent reads. On a large project agents read the trailhead and often skip the map, so a rule that lives only in WORLD.md or an area map rarely reaches them. Keep the block under 15 lines.
+
 ```markdown
 <!-- worldbuilder:start -->
 ## World map
 
-This project has a map of what exists and where: <link to world/WORLD.md> (also the `world` skill). Read it before creating anything new, so you extend existing work instead of rebuilding it.
+This project has a map of what exists and where: <link to world/WORLD.md> (also the `world` skill). Before creating or changing anything, open the area map for that part of the project and follow its Canon rules. Those rules are where stale docs and older patterns point the wrong way.
+
+Rules that hold everywhere (sources and evidence in <link to WORLD.md#canon>):
+
+- <one WORLD.md canon rule as a single instruction, naming the files or command it requires, no links>
 <!-- worldbuilder:end -->
 ```
+
+Take the rules from WORLD.md's Canon section, most costly trap first, at most 8. Leave out rules the trailhead already states outside the block.
+
+### Trailhead conflicts
+
+The trailhead outranks every map, so a stale line in it misleads agents even when a map has the right rule. worldbuilder never edits the trailhead outside its block. When a line outside the block is contradicted by the code, list it for the user with the evidence, so they can fix it.
 
 ## world/config.json (optional)
 

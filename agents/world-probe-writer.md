@@ -11,7 +11,7 @@ Inputs: project root, targets path (`world/.eval/targets.json`), output path, an
 
 **Canon mode** tests whether an agent follows established project rules. The targets are the Canon rules in the maps' `## Canon` sections, so read those (and the number of probes wanted) instead of a targets file. For each rule you pick:
 
-1. Read the rule's source and evidence in the territory, and confirm the rule holds. Skip rules whose source is the root `CLAUDE.md` or `AGENTS.md`, since every agent loads those already.
+1. Read the rule's source and evidence in the territory, and confirm the rule holds. Skip rules whose source is the root `CLAUDE.md` or `AGENTS.md` outside the `worldbuilder` block, since every agent loads those already. Rules inside the block are world canon: the baseline arm runs without the block, so they are fair to probe.
 2. Write a task, one to three sentences, whose correct execution the rule governs, and where the obvious approach, a stale doc, or an older pattern points the other way. Hand over the work. Don't state the rule or hint at it, and keep "existing", "already", "check", "find", "rule", and "convention" out of the task.
 3. Set the scoring fields so the trace can show compliance:
    - `expect`: files a compliant run must edit or create. Keep it to files any compliant solution touches.

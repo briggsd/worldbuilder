@@ -44,7 +44,7 @@ Done when `worldbuilder check` shows no world issues and every area map is linke
 ## Step 4: Router skill and trailhead
 
 1. Write `.claude/skills/world/SKILL.md` from the template. Its description names the areas in the words the project uses.
-2. Draft the trailhead block. Show the user the target file and the block, and wait for a yes. Then insert it near the top of that file, replacing any existing `worldbuilder:start` block.
+2. Draft the trailhead block, with WORLD.md's project-wide canon condensed into it as the format says. Show the user the target file, the block, and every trailhead conflict the cartographers reported, and wait for a yes on the block. Then insert it near the top of that file, replacing any existing `worldbuilder:start` block. The conflicts are the user's to fix: they sit outside the block.
 
 Done when `worldbuilder check` shows `world/WORLD.md` at hop 1 from the trailhead file.
 
